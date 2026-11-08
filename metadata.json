@@ -1,0 +1,6 @@
+{
+  "name": "TruckGestão - Gestão de Frotas",
+  "description": "Sistema completo e profissional de gestão de frotas comerciais e pesadas: telemetria, manutenção preventiva, abastecimento, controle de motoristas e custos operacionais.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

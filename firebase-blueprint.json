@@ -1,0 +1,262 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role-based access control (Admin or Driver)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 255 },
+        "name": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "enum": ["admin", "driver"] },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["uid", "email", "name", "role", "createdAt"]
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Motorista cadastrado com CNH e vinculação a veículo",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
+        "rg": { "type": "string", "maxLength": 30 },
+        "cpf": { "type": "string", "maxLength": 20 },
+        "address": { "type": "string", "maxLength": 255 },
+        "cnhCategory": { "type": "string", "maxLength": 10 },
+        "cnhNumber": { "type": "string", "maxLength": 30 },
+        "cnhExpiry": { "type": "string", "maxLength": 20 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "loginEmail": { "type": "string", "maxLength": 120 },
+        "accessCode": { "type": "string", "maxLength": 60 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "name", "cpf", "cnhCategory", "cnhNumber", "cnhExpiry", "active"]
+    },
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Caminhão ou veículo de transporte com controle de manutenção",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "plate": { "type": "string", "maxLength": 10 },
+        "model": { "type": "string", "maxLength": 100 },
+        "currentKm": { "type": "number" },
+        "lastOilChangeDate": { "type": "string", "maxLength": 30 },
+        "lastOilChangeKm": { "type": "number" },
+        "nextOilChangeKm": { "type": "number" },
+        "filtersReplaced": { "type": "boolean" },
+        "alertDismissed": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "plate", "model", "currentKm", "lastOilChangeKm", "nextOilChangeKm", "filtersReplaced"]
+    },
+    "DailyReport": {
+      "title": "DailyReport",
+      "description": "Relatório diário de trabalho preenchido pelo motorista",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "vehiclePlate": { "type": "string", "maxLength": 10 },
+        "date": { "type": "string", "maxLength": 20 },
+        "startKm": { "type": "number" },
+        "endKm": { "type": "number" },
+        "distanceKm": { "type": "number" },
+        "tollsCount": { "type": "number" },
+        "hasHelper": { "type": "boolean" },
+        "fuelCost": { "type": "number" },
+        "fuelLiters": { "type": "number" },
+        "otherExpenses": { "type": "string" },
+        "deliveries": { "type": "string" },
+        "totalDeliveries": { "type": "number" },
+        "totalFreight": { "type": "number" },
+        "totalOtherExpenses": { "type": "number" },
+        "canEdit": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["submitted", "approved", "paid"] },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "driverId", "date", "startKm", "endKm", "fuelCost", "fuelLiters", "totalFreight", "status"]
+    },
+    "Delivery": {
+      "title": "Delivery",
+      "description": "Item individual de entrega registrado na Etapa 2",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "reportId": { "type": "string", "maxLength": 128 },
+        "city": { "type": "string", "maxLength": 100 },
+        "material": { "type": "string", "maxLength": 200 },
+        "quantity": { "type": "string", "maxLength": 50 },
+        "freightValue": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "city", "material", "freightValue"]
+    },
+    "FuelRecord": {
+      "title": "FuelRecord",
+      "description": "Registro detalhado de abastecimento",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "reportId": { "type": "string", "maxLength": 128 },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 20 },
+        "fuelLiters": { "type": "number" },
+        "fuelCost": { "type": "number" },
+        "odometer": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "date", "fuelLiters", "fuelCost"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Despesas diversas de rota (Óleo, Manutenção, Outros)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "reportId": { "type": "string", "maxLength": 128 },
+        "category": { "type": "string", "enum": ["Óleo", "Manutenção", "Outros"] },
+        "amount": { "type": "number" },
+        "description": { "type": "string", "maxLength": 255 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "category", "amount"]
+    },
+    "DailyRate": {
+      "title": "DailyRate",
+      "description": "Configuração histórica das diárias de motorista e ajudante",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "driverDailyRate": { "type": "number" },
+        "helperDailyRate": { "type": "number" },
+        "effectiveDate": { "type": "string", "maxLength": 30 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "driverDailyRate", "helperDailyRate", "effectiveDate"]
+    },
+    "Toll": {
+      "title": "Toll",
+      "description": "Pedágios cadastrados por rota e data",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 20 },
+        "route": { "type": "string", "maxLength": 200 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "cost": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "date", "route", "cost"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Histórico de pagamentos efetuados por período",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "startDate": { "type": "string", "maxLength": 20 },
+        "endDate": { "type": "string", "maxLength": 20 },
+        "daysWorked": { "type": "number" },
+        "daysWithHelper": { "type": "number" },
+        "driverAmount": { "type": "number" },
+        "helperAmount": { "type": "number" },
+        "netReceived": { "type": "number" },
+        "totalFreight": { "type": "number" },
+        "confirmedAt": { "type": "string", "maxLength": 50 },
+        "confirmedByAdminEmail": { "type": "string", "maxLength": 120 }
+      },
+      "required": ["id", "driverId", "startDate", "endDate", "driverAmount", "helperAmount", "confirmedAt"]
+    },
+    "Maintenance": {
+      "title": "Maintenance",
+      "description": "Registro de troca de óleo e manutenções veiculares",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 20 },
+        "odometer": { "type": "number" },
+        "type": { "type": "string", "maxLength": 50 },
+        "cost": { "type": "number" },
+        "filtersReplaced": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "vehicleId", "date", "odometer"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Alertas operacionais do sistema para motoristas ou administradores",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "targetRole": { "type": "string", "enum": ["all", "admin", "driver"] },
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 100 },
+        "message": { "type": "string", "maxLength": 500 },
+        "type": { "type": "string", "enum": ["info", "warning", "critical"] },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "targetRole", "title", "message", "type", "read"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Perfis de usuários do sistema com papel (Admin ou Motorista)"
+    },
+    "/drivers/{driverId}": {
+      "schema": { "$ref": "#/entities/Driver" },
+      "description": "Cadastro completo dos motoristas da empresa"
+    },
+    "/vehicles/{vehicleId}": {
+      "schema": { "$ref": "#/entities/Vehicle" },
+      "description": "Caminhões e veículos com controle de quilometragem e troca de óleo"
+    },
+    "/dailyReports/{reportId}": {
+      "schema": { "$ref": "#/entities/DailyReport" },
+      "description": "Relatórios diários enviados pelos motoristas (etapa 1 e etapa 2)"
+    },
+    "/deliveries/{deliveryId}": {
+      "schema": { "$ref": "#/entities/Delivery" },
+      "description": "Entregas individuais por cidade e carga"
+    },
+    "/fuelRecords/{fuelRecordId}": {
+      "schema": { "$ref": "#/entities/FuelRecord" },
+      "description": "Registros de abastecimentos de diesel"
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "Despesas operacionais e de rota"
+    },
+    "/dailyRates/{rateId}": {
+      "schema": { "$ref": "#/entities/DailyRate" },
+      "description": "Configuração de diárias do motorista e ajudante com histórico"
+    },
+    "/tolls/{tollId}": {
+      "schema": { "$ref": "#/entities/Toll" },
+      "description": "Pedágios cadastrados por rota e veículo"
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/Payment" },
+      "description": "Histórico de pagamentos liquidados para motoristas e ajudantes"
+    },
+    "/maintenance/{maintenanceId}": {
+      "schema": { "$ref": "#/entities/Maintenance" },
+      "description": "Histórico de trocas de óleo e manutenções preventivas"
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "Notificações e avisos de manutenção, CNH e pagamentos"
+    }
+  }
+}

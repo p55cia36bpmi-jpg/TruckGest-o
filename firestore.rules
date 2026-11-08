@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    // Default deny catch-all for unknown paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Users collection (autenticação, perfil, credenciais)
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    // 2. Drivers collection (cadastro de motoristas com CNH e credenciais)
+    match /drivers/{driverId} {
+      allow read, write: if true;
+    }
+
+    // 3. Vehicles collection (veículos e controle de manutenção)
+    match /vehicles/{vehicleId} {
+      allow read, write: if true;
+    }
+
+    // 4. Daily Reports (relatórios diários de trabalho)
+    match /dailyReports/{reportId} {
+      allow read, write: if true;
+    }
+
+    // 5. Deliveries (entregas por cidade)
+    match /deliveries/{deliveryId} {
+      allow read, write: if true;
+    }
+
+    // 6. Fuel Records (abastecimentos)
+    match /fuelRecords/{fuelRecordId} {
+      allow read, write: if true;
+    }
+
+    // 7. Expenses (gastos diversos categorizados)
+    match /expenses/{expenseId} {
+      allow read, write: if true;
+    }
+
+    // 8. Daily Rates (valores de diárias com vigência)
+    match /dailyRates/{rateId} {
+      allow read, write: if true;
+    }
+
+    // 9. Tolls (pedágios por rota e veículo)
+    match /tolls/{tollId} {
+      allow read, write: if true;
+    }
+
+    // 10. Payments (cálculo e quitação de pagamentos)
+    match /payments/{paymentId} {
+      allow read, write: if true;
+    }
+
+    // 11. Maintenance (histórico de manutenções e troca de óleo)
+    match /maintenance/{maintenanceId} {
+      allow read, write: if true;
+    }
+
+    // 12. Notifications (alertas e avisos do sistema)
+    match /notifications/{notificationId} {
+      allow read, write: if true;
+    }
+  }
+}
