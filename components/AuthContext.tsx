@@ -114,6 +114,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signInWithCredentials = async (identifier: string, password: string): Promise<{ success: boolean; error?: string }> => {
+    const { isSupabaseConfigured } = await import('@/lib/supabase');
+    if (isSupabaseConfigured()) {
+      const { authenticateUserSupabase } = await import('@/services/supabaseService');
+      const supaResult = await authenticateUserSupabase(identifier, password);
+      if (supaResult.success && supaResult.profile) {
+        setProfile(supaResult.profile);
+        setRole(supaResult.profile.role);
+        setCurrentDriver(supaResult.driver || null);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(
+            'truckgestao_active_user',
+            JSON.stringify({ profile: supaResult.profile, driver: supaResult.driver })
+          );
+        }
+        return { success: true };
+      }
+    }
+
     const { authenticateUser } = await import('@/services/firestoreService');
     const result = await authenticateUser(identifier, password);
     if (result.success && result.profile) {
@@ -164,15 +182,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const switchDemoRole = async (targetRole: UserRole, targetDriverId?: string) => {
-    setRole(targetRole);
     if (targetRole === 'admin') {
+      if (profile?.role !== 'admin') {
+        return;
+      }
+      setRole('admin');
       const adminProfile: UserProfile = {
-        uid: 'admin-master',
-        email: 'admin@truckgestao.com',
-        name: 'Gestor de Frota (Administrador)',
+        uid: profile?.uid || 'admin-master',
+        email: profile?.email || 'admin@truckgestao.com',
+        name: profile?.name || 'Gestor de Frota (Administrador)',
         role: 'admin',
-        password: 'admin123',
-        createdAt: new Date().toISOString(),
+        password: profile?.password || 'admin123',
+        createdAt: profile?.createdAt || new Date().toISOString(),
       };
       setProfile(adminProfile);
       setCurrentDriver(null);
@@ -180,6 +201,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem('truckgestao_active_user', JSON.stringify({ profile: adminProfile }));
       }
     } else {
+      setRole('driver');
       const drivers = await getDrivers();
       const driver = targetDriverId 
         ? drivers.find((d) => d.id === targetDriverId) 

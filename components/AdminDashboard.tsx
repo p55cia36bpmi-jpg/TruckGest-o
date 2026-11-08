@@ -31,7 +31,6 @@ import {
 } from '@/services/firestoreService';
 import { MercosulPlate } from './MercosulPlate';
 import { Modal } from './Modal';
-import { SupabasePanel } from './SupabasePanel';
 import { 
   LayoutDashboard, 
   Truck, 
@@ -60,7 +59,7 @@ import {
   FileCheck2,
   AlertOctagon,
   Phone,
-  Database
+  ShieldAlert
 } from 'lucide-react';
 
 export interface DriverCnhStatus {
@@ -163,6 +162,8 @@ export function AdminDashboard({
   const [isTollModalOpen, setIsTollModalOpen] = useState(false);
   const [isOilChangeModalOpen, setIsOilChangeModalOpen] = useState(false);
   const [selectedVehicleForOil, setSelectedVehicleForOil] = useState<Vehicle | null>(null);
+  const [isDeleteManagerOpen, setIsDeleteManagerOpen] = useState(false);
+  const [deleteEntityTab, setDeleteEntityTab] = useState<'reports' | 'drivers' | 'vehicles' | 'rates' | 'tolls' | 'payments'>('reports');
 
   // Forms
   const [newDriver, setNewDriver] = useState({
@@ -472,6 +473,27 @@ export function AdminDashboard({
   // Check vehicles with oil alerts (< 200 km)
   const vehiclesWithOilAlert = vehicles.filter((v) => (v.nextOilChangeKm - v.currentKm) <= 200);
 
+  // Somente usuários cadastrados no Supabase com role 'admin' têm acesso ao painel
+  if (adminProfile.role !== 'admin') {
+    return (
+      <div className="bg-slate-900 border border-rose-500/40 rounded-2xl p-8 text-center max-w-xl mx-auto space-y-4 my-8 shadow-xl">
+        <div className="w-14 h-14 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto border border-rose-500/30">
+          <ShieldAlert className="w-7 h-7" />
+        </div>
+        <div className="space-y-1.5">
+          <h3 className="text-lg font-bold text-slate-100">Acesso Restrito ao Painel do Administrador</h3>
+          <p className="text-xs text-slate-400 leading-relaxed max-w-md mx-auto">
+            Somente os usuários cadastrados no Supabase com perfil de Administrador têm acesso a este painel com todas as funções de gestão, relatórios financeiros e exclusão de dados.
+          </p>
+        </div>
+        <div className="pt-2">
+          <span className="text-xs font-mono text-amber-400 block">Usuário conectado: {adminProfile.name}</span>
+          <span className="text-[11px] text-slate-500 block mt-1">Perfil: Motorista (Acesso Administrativo Não Permitido)</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Top Navigation Tabs for Admin */}
@@ -486,7 +508,6 @@ export function AdminDashboard({
           { id: 'payments', label: 'Cálculo de Pagamentos', icon: Calculator },
           { id: 'history', label: 'Histórico de Pagamentos', icon: History },
           { id: 'financial-report', label: 'Relatório Financeiro', icon: FileSpreadsheet },
-          { id: 'supabase', label: 'Supabase & Migrations', icon: Database },
         ].map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -567,13 +588,24 @@ export function AdminDashboard({
             </select>
           </div>
 
-          <button
-            onClick={handleExportCSV}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 text-xs font-medium transition-colors"
-          >
-            <Download className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Exportar CSV</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsDeleteManagerOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 rounded border border-rose-500/30 text-xs font-semibold transition-colors"
+              title="Painel exclusivo do administrador para gerenciar e excluir dados"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+              <span>Gerenciar & Excluir Dados</span>
+            </button>
+
+            <button
+              onClick={handleExportCSV}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 text-xs font-medium transition-colors"
+            >
+              <Download className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Exportar CSV</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -1687,7 +1719,7 @@ export function AdminDashboard({
             <div>
               <h4 className="text-base font-bold text-slate-100 flex items-center gap-2">
                 <FileSpreadsheet className="w-5 h-5 text-amber-400" />
-                Relatório Financeiro Consolidado (11 Indicadores Oficiais)
+                Relatório Financeiro Consolidado
               </h4>
               <p className="text-xs text-slate-400">
                 Período selecionado: <strong className="font-mono text-slate-200">{startDateFilter} até {endDateFilter}</strong>
@@ -1705,7 +1737,7 @@ export function AdminDashboard({
             </div>
           </div>
 
-          {/* Official 11 Indicators Grid */}
+          {/* Operational & Financial Indicators Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
               <h5 className="text-xs uppercase font-bold tracking-wider text-slate-400 border-b border-slate-800 pb-2">
@@ -1714,22 +1746,22 @@ export function AdminDashboard({
 
               <div className="space-y-3 text-xs">
                 <div className="flex justify-between py-2 border-b border-slate-800/80">
-                  <span className="text-slate-400">1. Quilometragem total percorrida:</span>
+                  <span className="text-slate-400">Quilometragem total percorrida:</span>
                   <strong className="font-mono text-slate-100 text-sm">{metrics.totalKm.toLocaleString('pt-BR')} km</strong>
                 </div>
 
                 <div className="flex justify-between py-2 border-b border-slate-800/80">
-                  <span className="text-slate-400">2. Quantidade total de combustível (litros):</span>
+                  <span className="text-slate-400">Quantidade total de combustível (litros):</span>
                   <strong className="font-mono text-slate-100 text-sm">{metrics.totalFuelLiters.toLocaleString('pt-BR')} L</strong>
                 </div>
 
                 <div className="flex justify-between py-2 border-b border-slate-800/80">
-                  <span className="text-slate-400">3. Valor total gasto com combustível:</span>
+                  <span className="text-slate-400">Valor total gasto com combustível:</span>
                   <strong className="font-mono text-amber-400 text-sm">R$ {metrics.totalFuelCost.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong>
                 </div>
 
                 <div className="flex justify-between py-2">
-                  <span className="text-slate-400">4. Média de quilômetros por litro:</span>
+                  <span className="text-slate-400">Média de quilômetros por litro:</span>
                   <strong className="font-mono text-emerald-400 text-sm">{metrics.avgKmL} km/L</strong>
                 </div>
               </div>
@@ -1742,37 +1774,37 @@ export function AdminDashboard({
 
               <div className="space-y-2.5 text-xs">
                 <div className="flex justify-between py-1.5 border-b border-slate-800/80">
-                  <span className="text-slate-400">5. Gastos com motorista:</span>
+                  <span className="text-slate-400">Gastos com motorista:</span>
                   <strong className="font-mono text-slate-200">R$ {metrics.driverExpenses.toFixed(2)}</strong>
                 </div>
 
                 <div className="flex justify-between py-1.5 border-b border-slate-800/80">
-                  <span className="text-slate-400">6. Gastos com ajudante:</span>
+                  <span className="text-slate-400">Gastos com ajudante:</span>
                   <strong className="font-mono text-slate-200">R$ {metrics.helperExpenses.toFixed(2)}</strong>
                 </div>
 
                 <div className="flex justify-between py-1.5 border-b border-slate-800/80">
-                  <span className="text-slate-400">7. Gastos com pedágios:</span>
+                  <span className="text-slate-400">Gastos com pedágios:</span>
                   <strong className="font-mono text-slate-200">R$ {metrics.totalTollsCost.toFixed(2)}</strong>
                 </div>
 
                 <div className="flex justify-between py-1.5 border-b border-slate-800/80">
-                  <span className="text-slate-400">8. Gastos diversos:</span>
+                  <span className="text-slate-400">Gastos diversos:</span>
                   <strong className="font-mono text-slate-200">R$ {metrics.totalOtherExpenses.toFixed(2)}</strong>
                 </div>
 
                 <div className="flex justify-between py-2 bg-slate-950 p-2.5 rounded-lg border border-slate-800 font-bold">
-                  <span className="text-rose-400">9. Total de Despesas (5+6+7+3+8):</span>
+                  <span className="text-rose-400">Total de Despesas:</span>
                   <span className="font-mono text-rose-400 text-sm">R$ {metrics.totalExpenses.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
                 </div>
 
                 <div className="flex justify-between py-2 bg-slate-950 p-2.5 rounded-lg border border-slate-800 font-bold">
-                  <span className="text-emerald-400">10. Valor Total dos Fretes:</span>
+                  <span className="text-emerald-400">Valor Total dos Fretes:</span>
                   <span className="font-mono text-emerald-400 text-sm">R$ {metrics.totalFreightRevenue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
                 </div>
 
                 <div className="flex justify-between py-2.5 bg-amber-500/10 p-3 rounded-xl border border-amber-500/30 font-bold">
-                  <span className="text-amber-400 text-sm">11. Lucro Líquido (10 - 9):</span>
+                  <span className="text-amber-400 text-sm">Lucro Líquido:</span>
                   <span className="font-mono text-amber-400 text-base">R$ {metrics.netProfit.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
                 </div>
               </div>
@@ -1781,10 +1813,7 @@ export function AdminDashboard({
         </div>
       )}
 
-      {/* TAB: INTEGRAÇÃO SUPABASE & MIGRATIONS */}
-      {activeTab === 'supabase' && (
-        <SupabasePanel />
-      )}
+
 
       {/* MODAL: CADASTRAR MOTORISTA (Section 3) */}
       <Modal
@@ -2250,6 +2279,251 @@ export function AdminDashboard({
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* MODAL: CENTRAL DE GERENCIAMENTO & EXCLUSÃO DE DADOS */}
+      <Modal
+        isOpen={isDeleteManagerOpen}
+        onClose={() => setIsDeleteManagerOpen(false)}
+        title="Central de Exclusão de Dados (Exclusivo Administrador)"
+        subtitle="Gerencie e remova registros de motoristas, veículos, relatórios e despesas com confirmação"
+        maxWidth="4xl"
+      >
+        <div className="space-y-4">
+          {/* Entity Selector Tabs */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3">
+            {[
+              { id: 'reports', label: `Relatórios (${dailyReports.length})`, icon: FileText },
+              { id: 'drivers', label: `Motoristas (${drivers.length})`, icon: Users },
+              { id: 'vehicles', label: `Veículos (${vehicles.length})`, icon: Truck },
+              { id: 'rates', label: `Diárias (${dailyRates.length})`, icon: Receipt },
+              { id: 'tolls', label: `Pedágios (${tolls.length})`, icon: DollarSign },
+              { id: 'payments', label: `Pagamentos (${payments.length})`, icon: History },
+            ].map((t) => {
+              const Icon = t.icon;
+              const isActive = deleteEntityTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => setDeleteEntityTab(t.id as any)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    isActive
+                      ? 'bg-rose-500 text-white font-bold'
+                      : 'text-slate-400 hover:text-slate-200 bg-slate-950'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  <span>{t.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* List Area with Direct Deletion */}
+          <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
+            {/* REPORTS */}
+            {deleteEntityTab === 'reports' && (
+              <div className="space-y-2">
+                {dailyReports.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Nenhum relatório diário cadastrado.</p>
+                ) : (
+                  dailyReports.map((r) => (
+                    <div key={r.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                      <div>
+                        <strong className="text-slate-200 block">{r.driverName} · Placa: {r.vehiclePlate}</strong>
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          Data: {r.date} · {r.distanceKm} km · Frete: R$ {r.totalFreight.toFixed(2)} · Status: {r.status}
+                        </span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Tem certeza que deseja excluir o relatório de ${r.driverName} da data ${r.date}?`)) {
+                            await deleteDailyReport(r.id);
+                            onRefreshData();
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* DRIVERS */}
+            {deleteEntityTab === 'drivers' && (
+              <div className="space-y-2">
+                {drivers.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Nenhum motorista cadastrado.</p>
+                ) : (
+                  drivers.map((d) => (
+                    <div key={d.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                      <div>
+                        <strong className="text-slate-200 block">{d.name}</strong>
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          CPF: {d.cpf} · CNH: {d.cnhNumber} (Cat. {d.cnhCategory}) · Venc: {d.cnhExpiry}
+                        </span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Tem certeza que deseja excluir o motorista ${d.name} e suas credenciais de acesso?`)) {
+                            await deleteDriver(d.id);
+                            onRefreshData();
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* VEHICLES */}
+            {deleteEntityTab === 'vehicles' && (
+              <div className="space-y-2">
+                {vehicles.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Nenhum veículo cadastrado.</p>
+                ) : (
+                  vehicles.map((v) => (
+                    <div key={v.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                      <div>
+                        <strong className="text-slate-200 block">{v.plate} - {v.model}</strong>
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          Odômetro: {v.currentKm.toLocaleString('pt-BR')} km · Próx. Óleo: {v.nextOilChangeKm.toLocaleString('pt-BR')} km
+                        </span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Tem certeza que deseja excluir o veículo ${v.plate}?`)) {
+                            await deleteVehicle(v.id);
+                            onRefreshData();
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* DAILY RATES */}
+            {deleteEntityTab === 'rates' && (
+              <div className="space-y-2">
+                {dailyRates.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Nenhuma diária cadastrada.</p>
+                ) : (
+                  dailyRates.map((rt) => (
+                    <div key={rt.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                      <div>
+                        <strong className="text-slate-200 block">Vigência a partir de {rt.effectiveDate}</strong>
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          Motorista: R$ {rt.driverDailyRate.toFixed(2)} · Ajudante: R$ {rt.helperDailyRate.toFixed(2)}
+                        </span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Excluir esta vigência de diária (${rt.effectiveDate})?`)) {
+                            await deleteDailyRate(rt.id);
+                            onRefreshData();
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* TOLLS */}
+            {deleteEntityTab === 'tolls' && (
+              <div className="space-y-2">
+                {tolls.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Nenhum pedágio cadastrado.</p>
+                ) : (
+                  tolls.map((t) => (
+                    <div key={t.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                      <div>
+                        <strong className="text-slate-200 block">{t.route}</strong>
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          Data: {t.date} · Veículo: {t.vehiclePlate || 'Geral'} · Valor: R$ {t.cost.toFixed(2)}
+                        </span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Excluir o pedágio "${t.route}"?`)) {
+                            await deleteToll(t.id);
+                            onRefreshData();
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* PAYMENTS */}
+            {deleteEntityTab === 'payments' && (
+              <div className="space-y-2">
+                {payments.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Nenhum histórico de pagamento arquivado.</p>
+                ) : (
+                  payments.map((p) => (
+                    <div key={p.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                      <div>
+                        <strong className="text-slate-200 block">{p.driverName}</strong>
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          Período: {p.startDate} a {p.endDate} · Pago: R$ {p.driverAmount.toFixed(2)} · Líquido: R$ {p.netReceived.toFixed(2)}
+                        </span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Excluir histórico de liquidação de ${p.driverName}?`)) {
+                            await deletePayment(p.id);
+                            onRefreshData();
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="pt-3 border-t border-slate-800 flex justify-between items-center text-xs text-slate-400">
+            <span>Atenção: A exclusão é definitiva no banco de dados.</span>
+            <button
+              onClick={() => setIsDeleteManagerOpen(false)}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg font-semibold transition-colors"
+            >
+              Fechar
+            </button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

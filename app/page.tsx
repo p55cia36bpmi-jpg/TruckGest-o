@@ -159,9 +159,16 @@ function TruckAppInner() {
           {/* Quick Access Switcher */}
           <div className="flex items-center bg-slate-950 border border-slate-800 p-1 rounded-xl text-xs font-semibold">
             <button
-              onClick={() => switchDemoRole('admin')}
+              onClick={() => {
+                if (profile?.role === 'admin') {
+                  switchDemoRole('admin');
+                } else {
+                  setLoginError('Acesso Restrito: Somente os usuários cadastrados no Supabase com perfil de Administrador têm acesso ao Painel com todas as funções.');
+                  setIsLoginModalOpen(true);
+                }
+              }}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                role === 'admin'
+                role === 'admin' && profile?.role === 'admin'
                   ? 'bg-amber-500 text-slate-950 shadow-sm font-bold'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
@@ -173,7 +180,7 @@ function TruckAppInner() {
             <button
               onClick={() => switchDemoRole('driver', drivers[0]?.id)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                role === 'driver'
+                role === 'driver' || profile?.role !== 'admin'
                   ? 'bg-amber-500 text-slate-950 shadow-sm font-bold'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
@@ -182,7 +189,7 @@ function TruckAppInner() {
               <span>Portal Motorista</span>
             </button>
 
-            {role === 'driver' && drivers.length > 1 && (
+            {drivers.length > 1 && (
               <select
                 value={activeDriver.id}
                 onChange={(e) => switchDemoRole('driver', e.target.value)}
@@ -211,7 +218,7 @@ function TruckAppInner() {
                   {profile?.name || (role === 'admin' ? 'Administrador' : activeDriver.name)}
                 </span>
                 <span className="text-[10px] font-mono text-amber-400">
-                  {role === 'admin' ? '👑 Admin' : '🚚 Motorista'}
+                  {profile?.role === 'admin' ? '👑 Admin' : '🚚 Motorista'}
                 </span>
               </div>
             </button>
@@ -230,7 +237,7 @@ function TruckAppInner() {
 
       {/* Main Content Area: Role-Based Routing */}
       <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
-        {role === 'admin' ? (
+        {role === 'admin' && profile?.role === 'admin' ? (
           <AdminDashboard
             drivers={drivers}
             vehicles={vehicles}
@@ -238,13 +245,7 @@ function TruckAppInner() {
             dailyRates={dailyRates}
             tolls={tolls}
             payments={payments}
-            adminProfile={profile || {
-              uid: 'admin-master',
-              email: user?.email || 'admin@truckgestao.com',
-              name: 'Administrador da Frota',
-              role: 'admin',
-              createdAt: '',
-            }}
+            adminProfile={profile}
             onRefreshData={loadData}
           />
         ) : (
@@ -261,7 +262,7 @@ function TruckAppInner() {
         isOpen={isLoginModalOpen}
         onClose={() => setIsLoginModalOpen(false)}
         title="Acesso ao Sistema TruckGestão"
-        subtitle="Autenticação com Login e Senha para Administradores e Motoristas"
+        subtitle="Somente usuários cadastrados no Supabase com perfil de Administrador têm acesso ao Painel com todas as funções"
         maxWidth="md"
       >
         <div className="space-y-5">
@@ -269,7 +270,7 @@ function TruckAppInner() {
           <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5" />
-              Contas de Teste Rápidas (1 Clique)
+              Contas de Acesso Cadastradas
             </span>
             <div className="grid grid-cols-1 gap-2 text-xs">
               <button
@@ -278,8 +279,8 @@ function TruckAppInner() {
                 className="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg flex items-center justify-between text-left transition-colors"
               >
                 <div>
-                  <strong className="text-slate-100 block">👑 Administrador Geral</strong>
-                  <span className="text-[11px] text-slate-400 font-mono">admin@truckgestao.com / admin123</span>
+                  <strong className="text-slate-100 block">👑 Administrador Supabase</strong>
+                  <span className="text-[11px] text-slate-400 font-mono">admin@truckgestao.com / admin123 (Acesso total + Exclusão de dados)</span>
                 </div>
                 <ArrowRight className="w-4 h-4 text-amber-400" />
               </button>
@@ -291,7 +292,7 @@ function TruckAppInner() {
               >
                 <div>
                   <strong className="text-slate-100 block">🚚 Motorista Carlos Eduardo</strong>
-                  <span className="text-[11px] text-slate-400 font-mono">carlos.silveira@truckgestao.com / carlos123</span>
+                  <span className="text-[11px] text-slate-400 font-mono">carlos.silveira@truckgestao.com / carlos123 (Portal do Motorista)</span>
                 </div>
                 <ArrowRight className="w-4 h-4 text-emerald-400" />
               </button>
@@ -303,7 +304,7 @@ function TruckAppInner() {
               >
                 <div>
                   <strong className="text-slate-100 block">🚚 Motorista Marcos Souza</strong>
-                  <span className="text-[11px] text-slate-400 font-mono">marcos.souza@truckgestao.com / marcos123</span>
+                  <span className="text-[11px] text-slate-400 font-mono">marcos.souza@truckgestao.com / marcos123 (Portal do Motorista)</span>
                 </div>
                 <ArrowRight className="w-4 h-4 text-emerald-400" />
               </button>
