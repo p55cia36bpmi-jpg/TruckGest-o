@@ -10,7 +10,8 @@ import {
   query, 
   where, 
   orderBy, 
-  limit 
+  limit,
+  onSnapshot
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '@/lib/firebase';
 import { 
@@ -21,7 +22,11 @@ import {
   TollRecord, 
   PaymentRecord, 
   SystemNotification,
-  UserProfile 
+  UserProfile,
+  VehicleChecklist,
+  MaintenanceRecord,
+  TripRequest,
+  TripRequestStatus
 } from '@/types/truck-service';
 
 // --- USERS & PROFILES ---
@@ -62,21 +67,29 @@ export async function createDriver(driverData: Omit<Driver, 'id' | 'createdAt'>)
   const path = 'drivers';
   try {
     const id = `drv-${Date.now()}`;
+    const cleanEmail = (driverData.loginEmail || `${id}@truckgestao.com`).trim().toLowerCase();
+    const cleanPassword = (driverData.password || '').trim();
+    if (!cleanPassword) {
+      throw new Error('É obrigatório definir uma senha de acesso para o motorista.');
+    }
+
     const newDriver: Driver = {
       ...driverData,
+      loginEmail: cleanEmail,
+      password: cleanPassword,
       id,
       createdAt: new Date().toISOString(),
     };
     await setDoc(doc(db, path, id), newDriver);
 
-    // Also sync user profile for authentication
+    // Also sync user profile for authentication (strictly role: 'driver')
     const userProfile: UserProfile = {
       uid: `user-${id}`,
-      email: newDriver.loginEmail || `${id}@truckgestao.com`,
+      email: cleanEmail,
       name: newDriver.name,
       role: 'driver',
       driverId: id,
-      password: newDriver.password || '123456',
+      password: cleanPassword,
       createdAt: new Date().toISOString(),
     };
     await setDoc(doc(db, 'users', `user-${id}`), userProfile);
@@ -91,13 +104,21 @@ export async function createDriver(driverData: Omit<Driver, 'id' | 'createdAt'>)
 export async function updateDriver(driver: Driver): Promise<void> {
   const path = `drivers/${driver.id}`;
   try {
-    await setDoc(doc(db, 'drivers', driver.id), driver, { merge: true });
+    const cleanEmail = (driver.loginEmail || `${driver.id}@truckgestao.com`).trim().toLowerCase();
+    const updatedDriver: Driver = {
+      ...driver,
+      loginEmail: cleanEmail,
+    };
+    await setDoc(doc(db, 'drivers', driver.id), updatedDriver, { merge: true });
 
-    // Keep users profile in sync
+    // Keep users profile in sync (strictly role: 'driver')
     const userProfile: Partial<UserProfile> = {
+      uid: `user-${driver.id}`,
       name: driver.name,
-      email: driver.loginEmail || `${driver.id}@truckgestao.com`,
-      password: driver.password,
+      email: cleanEmail,
+      role: 'driver',
+      driverId: driver.id,
+      ...(driver.password ? { password: driver.password.trim() } : {}),
     };
     await setDoc(doc(db, 'users', `user-${driver.id}`), userProfile, { merge: true });
   } catch (error) {
@@ -162,11 +183,25 @@ export async function deleteVehicle(id: string): Promise<void> {
   }
 }
 
+export async function getMaintenanceRecords(): Promise<MaintenanceRecord[]> {
+  const path = 'maintenance';
+  try {
+    const snap = await getDocs(collection(db, path));
+    return snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as MaintenanceRecord))
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
 export async function recordOilChange(
   vehicleId: string, 
   currentKm: number, 
   intervalKm: number = 20000, 
-  filtersReplaced: boolean = true
+  filtersReplaced: boolean = true,
+  cost: number = 0
 ): Promise<void> {
   const path = `vehicles/${vehicleId}`;
   try {
@@ -188,7 +223,63 @@ export async function recordOilChange(
       date: today,
       odometer: currentKm,
       type: 'Troca de Óleo e Filtros',
+      cost: Math.max(0, Number(cost) || 0),
       filtersReplaced,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateVehicleMileageMonitor(
+  vehicleId: string,
+  currentKm: number,
+  nextPreventiveMaintenanceKm: number,
+  nextOilChangeKm?: number
+): Promise<void> {
+  const path = `vehicles/${vehicleId}`;
+  try {
+    const updates: Record<string, unknown> = {
+      currentKm,
+      nextPreventiveMaintenanceKm,
+    };
+    if (typeof nextOilChangeKm === 'number' && !Number.isNaN(nextOilChangeKm)) {
+      updates.nextOilChangeKm = nextOilChangeKm;
+    }
+    await updateDoc(doc(db, 'vehicles', vehicleId), updates);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function recordPreventiveMaintenance(
+  vehicleId: string,
+  currentKm: number,
+  intervalKm: number = 20000,
+  cost: number = 0
+): Promise<void> {
+  const path = `vehicles/${vehicleId}`;
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const nextKm = currentKm + intervalKm;
+    await updateDoc(doc(db, 'vehicles', vehicleId), {
+      currentKm,
+      lastPreventiveMaintenanceDate: today,
+      lastPreventiveMaintenanceKm: currentKm,
+      nextPreventiveMaintenanceKm: nextKm,
+      preventiveIntervalKm: intervalKm,
+    });
+
+    const maintId = `maint-rev-${Date.now()}`;
+    await setDoc(doc(db, 'maintenance', maintId), {
+      id: maintId,
+      vehicleId,
+      date: today,
+      odometer: currentKm,
+      type: 'Revisão Preventiva Programada',
+      cost: Math.max(0, Number(cost) || 0),
+      filtersReplaced: true,
       createdAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -546,6 +637,231 @@ export async function markNotificationAsRead(id: string): Promise<void> {
   }
 }
 
+export function subscribeDriverNotifications(
+  driverId: string,
+  onData: (notifications: SystemNotification[]) => void
+): () => void {
+  const path = 'notifications';
+  const q = query(collection(db, path), where('targetRole', 'in', ['driver', 'all']));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ ...d.data(), id: d.id } as SystemNotification))
+        .filter((n) => !n.targetUserId || n.targetUserId === driverId)
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      onData(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  );
+}
+
+// --- VEHICLE CHECKLISTS (INSPEÇÃO E VERIFICAÇÃO DE ANOMALIAS) ---
+export async function getVehicleChecklists(): Promise<VehicleChecklist[]> {
+  const path = 'vehicleChecklists';
+  try {
+    const snap = await getDocs(collection(db, path));
+    return snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as VehicleChecklist))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export async function getDriverChecklists(driverId: string): Promise<VehicleChecklist[]> {
+  const path = 'vehicleChecklists';
+  try {
+    const q = query(collection(db, path), where('driverId', '==', driverId));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as VehicleChecklist))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export async function createVehicleChecklist(
+  checklistData: Omit<VehicleChecklist, 'id' | 'createdAt'>
+): Promise<VehicleChecklist> {
+  const path = 'vehicleChecklists';
+  try {
+    const id = `chk-${Date.now()}`;
+    const newChecklist: VehicleChecklist = {
+      ...checklistData,
+      id,
+      createdAt: new Date().toISOString(),
+    };
+    await setDoc(doc(db, path, id), newChecklist);
+
+    // Update vehicle currentKm if odometer in checklist is higher
+    if (checklistData.vehicleId && checklistData.odometerKm) {
+      const vSnap = await getDoc(doc(db, 'vehicles', checklistData.vehicleId));
+      if (vSnap.exists()) {
+        const v = vSnap.data() as Vehicle;
+        if (checklistData.odometerKm > (v.currentKm || 0)) {
+          await updateDoc(doc(db, 'vehicles', checklistData.vehicleId), {
+            currentKm: checklistData.odometerKm,
+          });
+        }
+      }
+    }
+
+    // Generate admin alert notification when anomalies are detected
+    if (checklistData.anomaliesCount > 0) {
+      const anomalyLabels = checklistData.items
+        .filter((i) => i.status === 'anomaly')
+        .map((i) => i.label)
+        .slice(0, 3)
+        .join(', ');
+      await createNotification({
+        targetRole: 'admin',
+        title: `Anomalia reportada: Veículo ${checklistData.vehiclePlate}`,
+        message: `Motorista ${checklistData.driverName} registrou ${checklistData.anomaliesCount} anomalia(s) no checklist (${anomalyLabels}).`,
+        type: checklistData.criticalAnomaliesCount > 0 ? 'critical' : 'warning',
+        read: false,
+      });
+    }
+
+    return newChecklist;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+    throw error;
+  }
+}
+
+export async function updateVehicleChecklist(checklist: VehicleChecklist): Promise<void> {
+  const path = `vehicleChecklists/${checklist.id}`;
+  try {
+    await setDoc(doc(db, 'vehicleChecklists', checklist.id), checklist, { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteVehicleChecklist(id: string): Promise<void> {
+  const path = `vehicleChecklists/${id}`;
+  try {
+    await deleteDoc(doc(db, 'vehicleChecklists', id));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export function subscribeDriverChecklists(
+  driverId: string,
+  onData: (checklists: VehicleChecklist[]) => void
+): () => void {
+  const path = 'vehicleChecklists';
+  const q = query(collection(db, path), where('driverId', '==', driverId));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ ...d.data(), id: d.id } as VehicleChecklist))
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      onData(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  );
+}
+
+// --- TRIP REQUESTS (SOLICITAÇÕES DE VIAGENS PENDENTES) ---
+export async function getTripRequests(): Promise<TripRequest[]> {
+  const path = 'tripRequests';
+  try {
+    const snap = await getDocs(collection(db, path));
+    return snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as TripRequest))
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export async function createTripRequest(
+  tripData: Omit<TripRequest, 'id' | 'createdAt' | 'status'>
+): Promise<TripRequest> {
+  const path = 'tripRequests';
+  try {
+    const id = `trip-${Date.now()}`;
+    const newTrip: TripRequest = {
+      ...tripData,
+      id,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    await setDoc(doc(db, path, id), newTrip);
+
+    // Also emit driver notification for real-time alert tracking
+    await createNotification({
+      targetRole: 'driver',
+      targetUserId: tripData.driverId,
+      title: `Nova solicitação de viagem: ${tripData.origin} → ${tripData.destination}`,
+      message: `Carga: ${tripData.cargoDescription} · Veículo ${tripData.vehiclePlate} · Data: ${tripData.scheduledDate.split('-').reverse().join('/')}.`,
+      type: tripData.priority === 'urgent' ? 'critical' : 'warning',
+      read: false,
+    });
+
+    return newTrip;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+    throw error;
+  }
+}
+
+export async function updateTripRequestStatus(
+  id: string,
+  status: TripRequestStatus
+): Promise<void> {
+  const path = `tripRequests/${id}`;
+  try {
+    await updateDoc(doc(db, 'tripRequests', id), {
+      status,
+      respondedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteTripRequest(id: string): Promise<void> {
+  const path = `tripRequests/${id}`;
+  try {
+    await deleteDoc(doc(db, 'tripRequests', id));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export function subscribeDriverTripRequests(
+  driverId: string,
+  onData: (trips: TripRequest[]) => void
+): () => void {
+  const path = 'tripRequests';
+  const q = query(collection(db, path), where('driverId', '==', driverId));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ ...d.data(), id: d.id } as TripRequest))
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      onData(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  );
+}
+
 // --- AUTHENTICATION & CREDENTIAL VERIFICATION ---
 export interface AuthResult {
   success: boolean;
@@ -563,7 +879,7 @@ export async function authenticateUser(identifier: string, password: string): Pr
   }
 
   try {
-    // 1. Check in users collection (Admin and system accounts)
+    // 1. Check in users collection (Admin and driver user accounts)
     const usersSnap = await getDocs(collection(db, 'users'));
     for (const d of usersSnap.docs) {
       const u = d.data() as UserProfile;
@@ -574,7 +890,14 @@ export async function authenticateUser(identifier: string, password: string): Pr
           let drv: Driver | undefined;
           if (u.driverId) {
             const drvSnap = await getDoc(doc(db, 'drivers', u.driverId));
-            if (drvSnap.exists()) drv = { ...drvSnap.data(), id: drvSnap.id } as Driver;
+            if (drvSnap.exists()) {
+              drv = { ...drvSnap.data(), id: drvSnap.id } as Driver;
+              if (drv.active === false) {
+                return { success: false, error: 'Acesso deste motorista está bloqueado pelo administrador.' };
+              }
+            } else if (u.role === 'driver') {
+              return { success: false, error: 'Cadastro do motorista não encontrado ou removido.' };
+            }
           }
           return { success: true, profile: u, driver: drv };
         } else {
@@ -583,17 +906,20 @@ export async function authenticateUser(identifier: string, password: string): Pr
       }
     }
 
-    // 2. Check in drivers collection (Motoristas by loginEmail, CPF, or first name)
+    // 2. Check in drivers collection (Motoristas by loginEmail, CPF, or ID)
     const drivers = await getDrivers();
     for (const drv of drivers) {
       const matchEmail = drv.loginEmail && drv.loginEmail.toLowerCase() === cleanId;
-      const matchCpf = drv.cpf && drv.cpf.replace(/\D/g, '') === cleanId.replace(/\D/g, '');
+      const cleanCpfInput = cleanId.replace(/\D/g, '');
+      const matchCpf = cleanCpfInput.length >= 11 && drv.cpf && drv.cpf.replace(/\D/g, '') === cleanCpfInput;
       const matchId = drv.id && drv.id.toLowerCase() === cleanId;
-      const matchFirstName = drv.name && drv.name.toLowerCase().split(' ')[0] === cleanId;
 
-      if (matchEmail || matchCpf || matchId || matchFirstName) {
-        const expectedPwd = drv.password || '123456';
-        if (expectedPwd === cleanPwd || cleanPwd === '123456') {
+      if (matchEmail || matchCpf || matchId) {
+        if (drv.active === false) {
+          return { success: false, error: 'Acesso deste motorista está bloqueado pelo administrador.' };
+        }
+        const expectedPwd = drv.password;
+        if (expectedPwd && expectedPwd === cleanPwd) {
           const profile: UserProfile = {
             uid: `user-${drv.id}`,
             email: drv.loginEmail || `${drv.id}@truckgestao.com`,

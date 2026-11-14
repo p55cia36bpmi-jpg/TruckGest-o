@@ -71,5 +71,17 @@ service cloud.firestore {
     match /notifications/{notificationId} {
       allow read, write: if true;
     }
+
+    // 13. Vehicle Checklists (inspeção veicular e anomalias)
+    match /vehicleChecklists/{checklistId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(checklistId);
+    }
+
+    // 14. Trip Requests (solicitações de viagens pendentes para motoristas)
+    match /tripRequests/{tripId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(tripId);
+    }
   }
 }

@@ -1,41 +1,58 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   Driver, 
   Vehicle, 
   DailyReport, 
   DeliveryItem, 
   OtherExpenseItem, 
-  ExpenseCategory 
+  ExpenseCategory,
+  SystemNotification,
+  VehicleChecklist,
+  TripRequest,
+  TripRequestStatus
 } from '@/types/truck-service';
 import { 
   createDailyReport, 
   updateDailyReport,
-  checkDailyReportExists, 
   getDailyReportByDriverAndDate,
   getDriverReports, 
-  updateVehicle 
+  updateVehicle,
+  subscribeDriverNotifications,
+  subscribeDriverChecklists,
+  subscribeDriverTripRequests,
+  markNotificationAsRead,
+  updateTripRequestStatus
 } from '@/services/firestoreService';
 import { MercosulPlate } from './MercosulPlate';
+import { VehicleChecklistSection } from './VehicleChecklistSection';
+import {
+  DriverAlertControlBar,
+  DriverToastStack,
+  DriverToastItem,
+} from './DriverToastNotifier';
+import {
+  playNotificationSound,
+  unlockNotificationAudio,
+} from '@/lib/notificationSound';
 import { 
   Truck, 
-  User, 
   FileText, 
   Plus, 
   Trash2, 
   AlertTriangle, 
   CheckCircle2, 
   Fuel, 
-  MapPin, 
   ChevronRight, 
   ArrowLeft, 
-  Calendar, 
-  DollarSign, 
-  Clock, 
   AlertCircle,
-  HelpCircle,
-  PackageCheck
+  PackageCheck,
+  ClipboardCheck,
+  Navigation,
+  MapPin,
+  Check,
+  X
 } from 'lucide-react';
 
 interface DriverPortalProps {
@@ -49,9 +66,74 @@ export function DriverPortal({
   vehicles,
   onRefreshData,
 }: DriverPortalProps) {
-  const [activeView, setActiveView] = useState<'home' | 'new-report' | 'history'>('home');
+  const [activeView, setActiveView] = useState<'home' | 'new-report' | 'checklist' | 'history'>('home');
   const [reports, setReports] = useState<DailyReport[]>([]);
   const [loadingReports, setLoadingReports] = useState(true);
+
+  // Real-time notifications, checklists, and trip requests
+  const [driverNotifications, setDriverNotifications] = useState<SystemNotification[]>([]);
+  const [driverChecklists, setDriverChecklists] = useState<VehicleChecklist[]>([]);
+  const [checklistsLoaded, setChecklistsLoaded] = useState(false);
+  const [tripRequests, setTripRequests] = useState<TripRequest[]>([]);
+  const [updatingTripId, setUpdatingTripId] = useState<string | null>(null);
+
+  // Sound & Toast Notification State
+  const [soundMuted, setSoundMuted] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('truckgestao_driver_sound_muted') === 'true';
+  });
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [toasts, setToasts] = useState<DriverToastItem[]>([]);
+  const soundMutedRef = useRef(soundMuted);
+  const seenAlertIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    soundMutedRef.current = soundMuted;
+  }, [soundMuted]);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const pushToastWithSound = useCallback(
+    (toast: DriverToastItem) => {
+      setToasts((prev) => {
+        if (prev.some((item) => item.id === toast.id)) return prev;
+        return [toast, ...prev].slice(0, 4);
+      });
+
+      if (!soundMutedRef.current) {
+        playNotificationSound(toast.category).then((status) => {
+          if (status === 'blocked') {
+            setAudioBlocked(true);
+          } else if (status === 'played') {
+            setAudioBlocked(false);
+          }
+        });
+      }
+
+      if (!toast.persistent) {
+        window.setTimeout(() => {
+          setToasts((prev) => prev.filter((item) => item.id !== toast.id));
+        }, 10000);
+      }
+    },
+    []
+  );
+
+  // Unlock Web Audio API on first user pointer interaction
+  useEffect(() => {
+    const handleUnlock = async () => {
+      const unlocked = await unlockNotificationAudio();
+      if (unlocked) {
+        setAudioBlocked(false);
+      }
+    };
+    window.addEventListener('pointerdown', handleUnlock, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleUnlock);
+    };
+  }, []);
 
   // Stepper state for Daily Report (Etapa 1 vs Etapa 2)
   const [step, setStep] = useState<1 | 2>(1);
@@ -110,6 +192,259 @@ export function DriverPortal({
       isMounted = false;
     };
   }, [currentDriver.id]);
+
+  // Subscribe to real-time Firestore notifications, checklists, and trip requests
+  useEffect(() => {
+    seenAlertIdsRef.current.clear();
+    const unsubNotif = subscribeDriverNotifications(currentDriver.id, (items) => {
+      setDriverNotifications(items);
+    });
+    const unsubChecklists = subscribeDriverChecklists(currentDriver.id, (items) => {
+      setDriverChecklists(items);
+      setChecklistsLoaded(true);
+    });
+    const unsubTrips = subscribeDriverTripRequests(currentDriver.id, (items) => {
+      setTripRequests(items);
+    });
+
+    return () => {
+      unsubNotif();
+      unsubChecklists();
+      unsubTrips();
+    };
+  }, [currentDriver.id]);
+
+  const todayDateStr = new Date().toISOString().slice(0, 10);
+  const hasTodayChecklist = useMemo(
+    () => driverChecklists.some((c) => c.date === todayDateStr),
+    [driverChecklists, todayDateStr]
+  );
+
+  const pendingTrips = useMemo(
+    () => tripRequests.filter((t) => t.status === 'pending'),
+    [tripRequests]
+  );
+
+  const activeTrips = useMemo(
+    () => tripRequests.filter((t) => t.status === 'accepted' || t.status === 'in_progress'),
+    [tripRequests]
+  );
+
+  const unreadDriverNotifications = useMemo(
+    () =>
+      driverNotifications.filter(
+        (n) => !n.read && !n.title.startsWith('Nova solicitação de viagem:')
+      ),
+    [driverNotifications]
+  );
+
+  const handleRespondTrip = useCallback(
+    async (trip: TripRequest, status: TripRequestStatus) => {
+      setUpdatingTripId(trip.id);
+      try {
+        await updateTripRequestStatus(trip.id, status);
+        // Mark matching notification as read if present
+        const relatedNotif = driverNotifications.find(
+          (n) =>
+            !n.read &&
+            n.title.includes(trip.origin) &&
+            n.title.includes(trip.destination)
+        );
+        if (relatedNotif) {
+          await markNotificationAsRead(relatedNotif.id);
+        }
+        dismissToast(`trip-${trip.id}`);
+        if (onRefreshData) onRefreshData();
+      } finally {
+        setUpdatingTripId(null);
+      }
+    },
+    [driverNotifications, dismissToast, onRefreshData]
+  );
+
+  // Trigger sound toasts for pending checklist, pending trip requests, and unread checklist alerts
+  useEffect(() => {
+    if (checklistsLoaded && !hasTodayChecklist) {
+      const alertKey = `pending-checklist-${currentDriver.id}-${todayDateStr}`;
+      if (!seenAlertIdsRef.current.has(alertKey)) {
+        seenAlertIdsRef.current.add(alertKey);
+        const timer = window.setTimeout(() => {
+          pushToastWithSound({
+            id: alertKey,
+            category: 'checklist',
+            title: 'Checklist Diário Pendente',
+            meta: `${linkedVehicle ? `Placa ${linkedVehicle.plate} · ` : ''}Inspeção obrigatória de hoje`,
+            message:
+              'Você ainda não enviou o checklist de verificação de anomalias do veículo hoje.',
+            actionLabel: 'Fazer Checklist',
+            onAction: () => setActiveView('checklist'),
+            persistent: true,
+            createdAt: new Date().toISOString(),
+          });
+        }, 0);
+        return () => window.clearTimeout(timer);
+      }
+    }
+  }, [
+    checklistsLoaded,
+    hasTodayChecklist,
+    currentDriver.id,
+    todayDateStr,
+    linkedVehicle,
+    pushToastWithSound,
+  ]);
+
+  useEffect(() => {
+    const newPendingTrips = pendingTrips.filter(
+      (trip) => !seenAlertIdsRef.current.has(`trip-${trip.id}`)
+    );
+    if (newPendingTrips.length === 0) return;
+
+    const timer = window.setTimeout(() => {
+      newPendingTrips.forEach((trip) => {
+        const toastId = `trip-${trip.id}`;
+        seenAlertIdsRef.current.add(toastId);
+        pushToastWithSound({
+          id: toastId,
+          category: trip.priority === 'urgent' ? 'critical' : 'trip',
+          title:
+            trip.priority === 'urgent'
+              ? 'Solicitação de Viagem Urgente!'
+              : 'Nova Solicitação de Viagem Pendente',
+          meta: `${trip.origin} → ${trip.destination} · ${trip.vehiclePlate}`,
+          message: `${trip.cargoDescription} · Agendada para ${trip.scheduledDate
+            .split('-')
+            .reverse()
+            .join('/')} · Frete est.: R$ ${trip.estimatedFreight.toLocaleString('pt-BR', {
+            minimumFractionDigits: 2,
+          })}`,
+          actionLabel: 'Aceitar Viagem',
+          onAction: () => handleRespondTrip(trip, 'accepted'),
+          secondaryLabel: 'Ver Viagens',
+          onSecondaryAction: () => setActiveView('home'),
+          persistent: true,
+          createdAt: trip.createdAt,
+        });
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [pendingTrips, pushToastWithSound, handleRespondTrip]);
+
+  useEffect(() => {
+    const freshNotifs = unreadDriverNotifications.filter(
+      (n) => !seenAlertIdsRef.current.has(`notif-${n.id}`)
+    );
+    if (freshNotifs.length === 0) return;
+
+    const timer = window.setTimeout(() => {
+      freshNotifs.forEach((notif) => {
+        const toastId = `notif-${notif.id}`;
+        seenAlertIdsRef.current.add(toastId);
+        const isChecklistNotif = notif.title.toLowerCase().includes('checklist');
+        pushToastWithSound({
+          id: toastId,
+          category:
+            notif.type === 'critical'
+              ? 'critical'
+              : isChecklistNotif
+              ? 'checklist'
+              : 'info',
+          title: notif.title,
+          meta: notif.createdAt
+            ? new Date(notif.createdAt).toLocaleTimeString('pt-BR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : undefined,
+          message: notif.message,
+          actionLabel: isChecklistNotif ? 'Ver Checklist' : 'Marcar Lida',
+          onAction: async () => {
+            await markNotificationAsRead(notif.id);
+            if (isChecklistNotif) setActiveView('checklist');
+          },
+          persistent: notif.type !== 'info',
+          createdAt: notif.createdAt,
+        });
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [unreadDriverNotifications, pushToastWithSound]);
+
+  const handleToggleSoundMute = () => {
+    setSoundMuted((prev) => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('truckgestao_driver_sound_muted', String(next));
+      }
+      return next;
+    });
+  };
+
+  const handleUnlockAudioClick = async () => {
+    const unlocked = await unlockNotificationAudio();
+    if (unlocked) {
+      setAudioBlocked(false);
+      await playNotificationSound('info');
+    }
+  };
+
+  const handleTestSoundToast = async () => {
+    await unlockNotificationAudio();
+    setAudioBlocked(false);
+    pushToastWithSound({
+      id: `test-toast-${Date.now()}`,
+      category: pendingTrips.length > 0 ? 'trip' : 'checklist',
+      title: 'Teste de Notificação Sonora Ativo',
+      meta: `${currentDriver.name} · Sistema de Áudio Web`,
+      message:
+        'Os alertas sonoros para checklists pendentes e novas solicitações de viagem estão funcionando.',
+      actionLabel: 'Abrir Checklist',
+      onAction: () => setActiveView('checklist'),
+      persistent: false,
+      createdAt: new Date().toISOString(),
+    });
+  };
+
+  const handleReplayPendingAlerts = async () => {
+    await unlockNotificationAudio();
+    setAudioBlocked(false);
+    if (!hasTodayChecklist) {
+      pushToastWithSound({
+        id: `replay-chk-${Date.now()}`,
+        category: 'checklist',
+        title: 'Checklist Diário Pendente',
+        meta: `${linkedVehicle ? `Placa ${linkedVehicle.plate} · ` : ''}Ação necessária`,
+        message: 'Realize o checklist de anomalias antes de iniciar ou encerrar a rota.',
+        actionLabel: 'Fazer Checklist',
+        onAction: () => setActiveView('checklist'),
+        persistent: true,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    pendingTrips.slice(0, 2).forEach((trip) => {
+      pushToastWithSound({
+        id: `replay-trip-${trip.id}-${Date.now()}`,
+        category: trip.priority === 'urgent' ? 'critical' : 'trip',
+        title: 'Solicitação de Viagem Pendente',
+        meta: `${trip.origin} → ${trip.destination} · ${trip.vehiclePlate}`,
+        message: `${trip.cargoDescription} · Agendada para ${trip.scheduledDate
+          .split('-')
+          .reverse()
+          .join('/')}`,
+        actionLabel: 'Aceitar Viagem',
+        onAction: () => handleRespondTrip(trip, 'accepted'),
+        persistent: true,
+        createdAt: trip.createdAt,
+      });
+    });
+  };
+
+  const activePendingAlertsCount =
+    (checklistsLoaded && !hasTodayChecklist ? 1 : 0) +
+    pendingTrips.length +
+    unreadDriverNotifications.length;
 
   // Calculations
   const distanceKm = Math.max(0, endKm - startKm);
@@ -370,8 +705,19 @@ export function DriverPortal({
         </div>
       )}
 
+      {/* Sound Notification Control Bar */}
+      <DriverAlertControlBar
+        soundMuted={soundMuted}
+        audioBlocked={audioBlocked}
+        activeAlertsCount={activePendingAlertsCount}
+        onToggleMute={handleToggleSoundMute}
+        onUnlockAudio={handleUnlockAudioClick}
+        onTestSoundToast={handleTestSoundToast}
+        onReplayPendingAlerts={handleReplayPendingAlerts}
+      />
+
       {/* Driver Quick View Selector */}
-      <div className="flex items-center gap-3 border-b border-slate-800 pb-2">
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3 border-b border-slate-800 pb-2">
         <button
           onClick={() => {
             setActiveView('home');
@@ -385,6 +731,31 @@ export function DriverPortal({
         >
           <Truck className="w-4 h-4" />
           <span>Início / Meu Caminhão</span>
+          {pendingTrips.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full bg-rose-500 text-white font-mono text-[10px] font-bold">
+              {pendingTrips.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => {
+            setActiveView('checklist');
+            setSuccessMessage(null);
+          }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+            activeView === 'checklist'
+              ? 'bg-amber-500 text-slate-950 shadow-md'
+              : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900'
+          }`}
+        >
+          <ClipboardCheck className="w-4 h-4" />
+          <span>Checklist / Anomalias</span>
+          {checklistsLoaded && !hasTodayChecklist && (
+            <span className="px-1.5 py-0.5 rounded-full bg-orange-500 text-slate-950 font-mono text-[10px] font-bold">
+              1
+            </span>
+          )}
         </button>
 
         <button
@@ -420,63 +791,210 @@ export function DriverPortal({
 
       {/* VIEW: HOME OVERVIEW FOR DRIVER */}
       {activeView === 'home' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Quick Action Button Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-4 shadow-sm">
-            <div>
-              <span className="text-xs uppercase font-bold text-amber-400 tracking-wider">
-                Rotina Diária
-              </span>
-              <h3 className="text-lg font-bold text-slate-100 mt-1">
-                Lançamento do Dia de Trabalho
-              </h3>
-              <p className="text-xs text-slate-400 leading-relaxed mt-1">
-                Preencha os dados do trajeto, combustível, pedágios, ajudante e a lista de cidades com as entregas realizadas hoje.
-              </p>
+        <div className="space-y-6">
+          {/* Solicitações de Viagens Pendentes / Ativas */}
+          {(pendingTrips.length > 0 || activeTrips.length > 0) && (
+            <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-5 space-y-4 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <Navigation className="w-5 h-5 text-amber-400" />
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-100">
+                      Solicitações de Viagens Despachadas
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      {pendingTrips.length} pendente{pendingTrips.length === 1 ? '' : 's'} de aceite · {activeTrips.length} em andamento
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {[...pendingTrips, ...activeTrips].map((trip) => {
+                  const isPending = trip.status === 'pending';
+                  const isAccepted = trip.status === 'accepted';
+                  const isInProgress = trip.status === 'in_progress';
+                  return (
+                    <div
+                      key={trip.id}
+                      className={`p-4 rounded-xl border space-y-3 ${
+                        isPending
+                          ? trip.priority === 'urgent'
+                            ? 'bg-rose-950/20 border-rose-500/60'
+                            : 'bg-amber-950/15 border-amber-500/50'
+                          : 'bg-slate-950 border-slate-800'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5 text-sm font-bold text-slate-100">
+                            <MapPin className="w-4 h-4 text-amber-400 shrink-0" />
+                            <span>
+                              {trip.origin} → {trip.destination}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-400 font-mono block mt-0.5">
+                            Data: {trip.scheduledDate.split('-').reverse().join('/')} · Veículo: {trip.vehiclePlate}
+                          </span>
+                        </div>
+                        <span className="text-xs font-mono font-bold text-emerald-400 shrink-0">
+                          R$ {trip.estimatedFreight.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      <div className="text-xs text-slate-300">
+                        <span className="text-slate-400">Carga:</span> {trip.cargoDescription}
+                        {trip.notes && (
+                          <p className="text-[11px] text-slate-400 mt-1">Obs: {trip.notes}</p>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80">
+                        <span className="text-[11px] font-mono text-slate-400">
+                          {isPending
+                            ? trip.priority === 'urgent'
+                              ? 'Prioridade: Urgente · Aguardando aceite'
+                              : 'Status: Pendente de aceite'
+                            : isAccepted
+                            ? 'Status: Aceita · Pronta para iniciar'
+                            : 'Status: Em rota'}
+                        </span>
+
+                        <div className="flex items-center gap-2">
+                          {isPending && (
+                            <>
+                              <button
+                                type="button"
+                                disabled={updatingTripId === trip.id}
+                                onClick={() => handleRespondTrip(trip, 'rejected')}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                <span>Recusar</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={updatingTripId === trip.id}
+                                onClick={() => handleRespondTrip(trip, 'accepted')}
+                                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                <span>Aceitar Viagem</span>
+                              </button>
+                            </>
+                          )}
+                          {isAccepted && (
+                            <button
+                              type="button"
+                              disabled={updatingTripId === trip.id}
+                              onClick={() => handleRespondTrip(trip, 'in_progress')}
+                              className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold flex items-center gap-1 disabled:opacity-50"
+                            >
+                              <Navigation className="w-3.5 h-3.5" />
+                              <span>Iniciar Rota</span>
+                            </button>
+                          )}
+                          {isInProgress && (
+                            <button
+                              type="button"
+                              disabled={updatingTripId === trip.id}
+                              onClick={() => handleRespondTrip(trip, 'completed')}
+                              className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold flex items-center gap-1 disabled:opacity-50"
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>Concluir Viagem</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Quick Action Button Card */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-4 shadow-sm">
+              <div>
+                <span className="text-xs uppercase font-bold text-amber-400 tracking-wider">
+                  Rotina Diária
+                </span>
+                <h3 className="text-lg font-bold text-slate-100 mt-1">
+                  Lançamento do Dia de Trabalho
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed mt-1">
+                  Faça a inspeção de anomalias do caminhão antes de sair e preencha os dados do trajeto, combustível, pedágios e entregas do dia.
+                </p>
+              </div>
+
+              <div className="space-y-2.5">
+                <button
+                  onClick={() => setActiveView('checklist')}
+                  className="w-full py-3.5 bg-slate-800 hover:bg-slate-700 text-amber-400 border border-amber-500/30 font-bold text-sm rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all active:scale-[0.99]"
+                >
+                  <ClipboardCheck className="w-5 h-5" />
+                  <span>
+                    {checklistsLoaded && !hasTodayChecklist
+                      ? 'CHECKLIST PENDENTE HOJE — REALIZAR AGORA'
+                      : 'CHECKLIST & VERIFICAÇÃO DE ANOMALIAS'}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setActiveView('new-report')}
+                  className="w-full py-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-base rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.99]"
+                >
+                  <Plus className="w-5 h-5" />
+                  <span>INICIAR RELATÓRIO DE HOJE</span>
+                </button>
+              </div>
             </div>
 
-            <button
-              onClick={() => setActiveView('new-report')}
-              className="w-full py-4 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-base rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.99]"
-            >
-              <Plus className="w-5 h-5" />
-              <span>INICIAR RELATÓRIO DE HOJE</span>
-            </button>
-          </div>
-
-          {/* Maintenance Status Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">
-                Status de Manutenção
-              </span>
-              <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                Filtros Trocados: {linkedVehicle?.filtersReplaced ? 'SIM' : 'NÃO'}
-              </span>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div className="flex justify-between py-1.5 border-b border-slate-800">
-                <span className="text-slate-400">Última Troca de Óleo:</span>
-                <span className="font-mono text-slate-200">
-                  {linkedVehicle?.lastOilChangeDate.split('-').reverse().join('/')} ({linkedVehicle?.lastOilChangeKm.toLocaleString('pt-BR')} km)
+            {/* Maintenance Status Card */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">
+                  Status de Manutenção
+                </span>
+                <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  Filtros Trocados: {linkedVehicle?.filtersReplaced ? 'SIM' : 'NÃO'}
                 </span>
               </div>
-              <div className="flex justify-between py-1.5 border-b border-slate-800">
-                <span className="text-slate-400">Próxima Troca de Óleo:</span>
-                <span className={`font-mono font-bold ${kmToNextOilChange <= 200 ? 'text-orange-400' : 'text-slate-200'}`}>
-                  {linkedVehicle?.nextOilChangeKm.toLocaleString('pt-BR')} km (em {kmToNextOilChange} km)
-                </span>
-              </div>
-              <div className="flex justify-between py-1.5 border-b border-slate-800">
-                <span className="text-slate-400">Quilometragem Atual:</span>
-                <span className="font-mono font-bold text-slate-100 text-sm">
-                  {linkedVehicle?.currentKm.toLocaleString('pt-BR')} km
-                </span>
+
+              <div className="space-y-3 text-xs">
+                <div className="flex justify-between py-1.5 border-b border-slate-800">
+                  <span className="text-slate-400">Última Troca de Óleo:</span>
+                  <span className="font-mono text-slate-200">
+                    {linkedVehicle?.lastOilChangeDate.split('-').reverse().join('/')} ({linkedVehicle?.lastOilChangeKm.toLocaleString('pt-BR')} km)
+                  </span>
+                </div>
+                <div className="flex justify-between py-1.5 border-b border-slate-800">
+                  <span className="text-slate-400">Próxima Troca de Óleo:</span>
+                  <span className={`font-mono font-bold ${kmToNextOilChange <= 200 ? 'text-orange-400' : 'text-slate-200'}`}>
+                    {linkedVehicle?.nextOilChangeKm.toLocaleString('pt-BR')} km (em {kmToNextOilChange} km)
+                  </span>
+                </div>
+                <div className="flex justify-between py-1.5 border-b border-slate-800">
+                  <span className="text-slate-400">Quilometragem Atual:</span>
+                  <span className="font-mono font-bold text-slate-100 text-sm">
+                    {linkedVehicle?.currentKm.toLocaleString('pt-BR')} km
+                  </span>
+                </div>
               </div>
             </div>
           </div>
         </div>
+      )}
+
+      {/* VIEW: VEHICLE CHECKLIST & ANOMALIES */}
+      {activeView === 'checklist' && (
+        <VehicleChecklistSection
+          currentDriver={currentDriver}
+          linkedVehicle={linkedVehicle}
+          onRefreshData={onRefreshData}
+        />
       )}
 
       {/* VIEW: NEW DAILY REPORT (2 ETAPAS) */}
@@ -1005,6 +1523,9 @@ export function DriverPortal({
           )}
         </div>
       )}
+
+      {/* Floating Sound Toast Stack */}
+      <DriverToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

@@ -494,6 +494,9 @@ export async function authenticateUserSupabase(identifier: string, password: str
             .eq('id', userMatch.driver_id)
             .single();
           if (drvData) {
+            if (drvData.active === false) {
+              return { success: false, error: 'Acesso deste motorista está bloqueado pelo administrador.' };
+            }
             drv = {
               id: drvData.id,
               name: drvData.name,
@@ -510,6 +513,8 @@ export async function authenticateUserSupabase(identifier: string, password: str
               active: drvData.active,
               createdAt: drvData.created_at,
             };
+          } else if (userMatch.role === 'driver') {
+            return { success: false, error: 'Cadastro do motorista não encontrado.' };
           }
         }
         return {

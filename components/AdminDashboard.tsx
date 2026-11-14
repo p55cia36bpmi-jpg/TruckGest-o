@@ -9,7 +9,10 @@ import {
   TollRecord, 
   PaymentRecord, 
   SystemNotification,
-  UserProfile 
+  UserProfile,
+  VehicleChecklist,
+  MaintenanceRecord,
+  TripRequest
 } from '@/types/truck-service';
 import { 
   createDriver, 
@@ -18,7 +21,9 @@ import {
   createVehicle, 
   updateVehicle, 
   deleteVehicle,
-  recordOilChange, 
+  recordOilChange,
+  updateVehicleMileageMonitor,
+  recordPreventiveMaintenance,
   createDailyRate, 
   deleteDailyRate,
   createToll, 
@@ -27,11 +32,16 @@ import {
   deletePayment,
   checkPaymentExistsForPeriod, 
   updateDailyReport,
-  deleteDailyReport 
+  deleteDailyReport,
+  deleteVehicleChecklist,
+  createTripRequest,
+  deleteTripRequest
 } from '@/services/firestoreService';
 import { MercosulPlate } from './MercosulPlate';
 import { Modal } from './Modal';
 import { PrintReportsModal } from './PrintReportsModal';
+import { AdminChecklistsView } from './AdminChecklistsView';
+import { MonthlyCostsChart } from './MonthlyCostsChart';
 import { 
   LayoutDashboard, 
   Truck, 
@@ -60,7 +70,18 @@ import {
   FileCheck2,
   AlertOctagon,
   Phone,
-  ShieldAlert
+  ShieldAlert,
+  ClipboardCheck,
+  KeyRound,
+  Edit2,
+  Lock,
+  Unlock,
+  Eye,
+  EyeOff,
+  Gauge,
+  SlidersHorizontal,
+  Navigation,
+  Send
 } from 'lucide-react';
 
 export interface DriverCnhStatus {
@@ -107,6 +128,50 @@ export function checkDriverCnhStatus(driver: Driver, referenceDate = new Date())
   };
 }
 
+export interface VehiclePreventiveStatus {
+  vehicle: Vehicle;
+  currentKm: number;
+  limitKm: number;
+  baselineKm: number;
+  remainingKm: number;
+  exceededKm: number;
+  isExceeded: boolean;
+  isWarning: boolean;
+  progressPercent: number;
+}
+
+/**
+ * Avalia o monitoramento de quilometragem do veículo em relação ao limite
+ * configurado para a próxima revisão preventiva.
+ */
+export function checkVehiclePreventiveStatus(vehicle: Vehicle): VehiclePreventiveStatus {
+  const currentKm = vehicle.currentKm || 0;
+  const limitKm = vehicle.nextPreventiveMaintenanceKm ?? vehicle.nextOilChangeKm;
+  const baselineKm = vehicle.lastPreventiveMaintenanceKm ?? vehicle.lastOilChangeKm ?? 0;
+  const remainingKm = limitKm - currentKm;
+  const exceededKm = Math.max(0, currentKm - limitKm);
+  const isExceeded = currentKm > limitKm;
+  const isWarning = !isExceeded && remainingKm <= 1000;
+
+  const span = Math.max(1, limitKm - baselineKm);
+  const rawPercent = ((currentKm - baselineKm) / span) * 100;
+  const progressPercent = isExceeded
+    ? 100
+    : Math.min(100, Math.max(0, Math.round(rawPercent)));
+
+  return {
+    vehicle,
+    currentKm,
+    limitKm,
+    baselineKm,
+    remainingKm,
+    exceededKm,
+    isExceeded,
+    isWarning,
+    progressPercent,
+  };
+}
+
 interface AdminDashboardProps {
   drivers: Driver[];
   vehicles: Vehicle[];
@@ -114,6 +179,9 @@ interface AdminDashboardProps {
   dailyRates: DailyRateConfig[];
   tolls: TollRecord[];
   payments: PaymentRecord[];
+  checklists: VehicleChecklist[];
+  maintenanceRecords?: MaintenanceRecord[];
+  tripRequests?: TripRequest[];
   adminProfile: UserProfile;
   onRefreshData: () => void;
 }
@@ -125,6 +193,9 @@ export function AdminDashboard({
   dailyRates,
   tolls,
   payments,
+  checklists,
+  maintenanceRecords = [],
+  tripRequests = [],
   adminProfile,
   onRefreshData,
 }: AdminDashboardProps) {
@@ -158,17 +229,38 @@ export function AdminDashboard({
 
   // Modals
   const [isDriverModalOpen, setIsDriverModalOpen] = useState(false);
+  const [editingDriver, setEditingDriver] = useState<Driver | null>(null);
+  const [driverFormError, setDriverFormError] = useState<string | null>(null);
+  const [driverFeedback, setDriverFeedback] = useState<string | null>(null);
+  const [isSavingDriver, setIsSavingDriver] = useState(false);
+  const [revealedPasswordIds, setRevealedPasswordIds] = useState<Record<string, boolean>>({});
   const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
+  const [vehicleMonitorFilter, setVehicleMonitorFilter] = useState<'all' | 'exceeded' | 'warning' | 'ok'>('all');
+  const [vehicleFeedback, setVehicleFeedback] = useState<string | null>(null);
+  const [isMileageConfigModalOpen, setIsMileageConfigModalOpen] = useState(false);
+  const [selectedVehicleForMileage, setSelectedVehicleForMileage] = useState<Vehicle | null>(null);
+  const [mileageConfigForm, setMileageConfigForm] = useState({
+    currentKm: 0,
+    nextPreventiveMaintenanceKm: 20000,
+    nextOilChangeKm: 20000,
+  });
+  const [isPreventiveModalOpen, setIsPreventiveModalOpen] = useState(false);
+  const [selectedVehicleForPreventive, setSelectedVehicleForPreventive] = useState<Vehicle | null>(null);
+  const [preventiveForm, setPreventiveForm] = useState({
+    currentKm: 0,
+    intervalKm: 20000,
+    cost: 0,
+  });
   const [isRateModalOpen, setIsRateModalOpen] = useState(false);
   const [isTollModalOpen, setIsTollModalOpen] = useState(false);
   const [isOilChangeModalOpen, setIsOilChangeModalOpen] = useState(false);
   const [selectedVehicleForOil, setSelectedVehicleForOil] = useState<Vehicle | null>(null);
   const [isDeleteManagerOpen, setIsDeleteManagerOpen] = useState(false);
-  const [deleteEntityTab, setDeleteEntityTab] = useState<'reports' | 'drivers' | 'vehicles' | 'rates' | 'tolls' | 'payments'>('reports');
+  const [deleteEntityTab, setDeleteEntityTab] = useState<'reports' | 'checklists' | 'drivers' | 'vehicles' | 'rates' | 'tolls' | 'payments'>('reports');
 
   // Dedicated Confirmation Modal for Deletions (avoids blocked window.confirm in iframes)
   interface DeleteTarget {
-    type: 'vehicle' | 'driver' | 'dailyReport' | 'dailyRate' | 'toll' | 'payment';
+    type: 'vehicle' | 'driver' | 'dailyReport' | 'dailyRate' | 'toll' | 'payment' | 'checklist' | 'tripRequest';
     id: string;
     title: string;
     description: string;
@@ -180,6 +272,22 @@ export function AdminDashboard({
   // Printable PDF Modal for Daily Trip & Cost Reports
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   const [reportForPrint, setReportForPrint] = useState<DailyReport | null>(null);
+
+  // Trip Dispatch Modal State
+  const [isTripDispatchModalOpen, setIsTripDispatchModalOpen] = useState(false);
+  const [isDispatchingTrip, setIsDispatchingTrip] = useState(false);
+  const [tripDispatchFeedback, setTripDispatchFeedback] = useState<string | null>(null);
+  const [tripDispatchForm, setTripDispatchForm] = useState({
+    driverId: drivers[0]?.id || '',
+    vehicleId: drivers[0]?.vehicleId || vehicles[0]?.id || '',
+    origin: 'Campinas, SP',
+    destination: '',
+    cargoDescription: '',
+    estimatedFreight: 850,
+    scheduledDate: new Date().toISOString().slice(0, 10),
+    priority: 'normal' as 'normal' | 'urgent',
+    notes: '',
+  });
 
   // Forms
   const [newDriver, setNewDriver] = useState({
@@ -204,6 +312,7 @@ export function AdminDashboard({
     lastOilChangeDate: new Date().toISOString().slice(0, 10),
     lastOilChangeKm: 0,
     nextOilChangeKm: 20000,
+    nextPreventiveMaintenanceKm: 20000,
     filtersReplaced: true,
   });
 
@@ -224,6 +333,7 @@ export function AdminDashboard({
     currentKm: 0,
     intervalKm: 20000,
     filtersReplaced: true,
+    cost: 0,
   });
 
   // Payment Calculation State (Section 10)
@@ -354,13 +464,136 @@ export function AdminDashboard({
     };
   }, [calcDriverId, calcStartDate, calcEndDate, dailyReports, drivers, currentDailyRate]);
 
-  // Handlers
-  const handleCreateDriver = async (e: React.FormEvent) => {
+  // Driver Creation & Editing Handlers
+  const openCreateDriverModal = () => {
+    setEditingDriver(null);
+    setDriverFormError(null);
+    setNewDriver({
+      name: '',
+      rg: '',
+      cpf: '',
+      address: '',
+      cnhCategory: 'E',
+      cnhNumber: '',
+      cnhExpiry: '2028-12-31',
+      vehicleId: vehicles[0]?.id || '',
+      loginEmail: '',
+      password: '',
+      phone: '',
+      active: true,
+    });
+    setIsDriverModalOpen(true);
+  };
+
+  const openEditDriverModal = (d: Driver) => {
+    setEditingDriver(d);
+    setDriverFormError(null);
+    setNewDriver({
+      name: d.name,
+      rg: d.rg,
+      cpf: d.cpf,
+      address: d.address || '',
+      cnhCategory: d.cnhCategory,
+      cnhNumber: d.cnhNumber,
+      cnhExpiry: d.cnhExpiry,
+      vehicleId: d.vehicleId || '',
+      loginEmail: d.loginEmail || '',
+      password: d.password || '',
+      phone: d.phone || '',
+      active: d.active !== false,
+    });
+    setIsDriverModalOpen(true);
+  };
+
+  const handleGenerateDriverPassword = () => {
+    const num = Math.floor(1000 + Math.random() * 9000);
+    setNewDriver((prev) => ({ ...prev, password: `Trk@${num}` }));
+  };
+
+  const handleSaveDriver = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newDriver.name || !newDriver.cpf) return;
-    await createDriver(newDriver);
-    setIsDriverModalOpen(false);
-    onRefreshData();
+    setDriverFormError(null);
+
+    const cleanName = newDriver.name.trim();
+    const cleanCpf = newDriver.cpf.trim();
+    const cleanEmail = newDriver.loginEmail.trim().toLowerCase();
+    const cleanPassword = newDriver.password.trim();
+
+    if (!cleanName || !cleanCpf) {
+      setDriverFormError('Nome completo e CPF são obrigatórios.');
+      return;
+    }
+    if (!cleanEmail) {
+      setDriverFormError('Informe o e-mail de login do motorista para acesso ao sistema.');
+      return;
+    }
+    if (cleanEmail === 'admin@truckgestao.com' || cleanEmail === adminProfile.email.toLowerCase()) {
+      setDriverFormError('Este e-mail pertence ao Administrador e não pode ser usado por um motorista.');
+      return;
+    }
+    if (!editingDriver && cleanPassword.length < 4) {
+      setDriverFormError('Defina uma senha com pelo menos 4 caracteres para o motorista.');
+      return;
+    }
+    if (editingDriver && cleanPassword && cleanPassword.length < 4) {
+      setDriverFormError('A nova senha deve ter pelo menos 4 caracteres.');
+      return;
+    }
+
+    const duplicateEmail = drivers.find(
+      (d) => d.id !== editingDriver?.id && d.loginEmail?.trim().toLowerCase() === cleanEmail
+    );
+    if (duplicateEmail) {
+      setDriverFormError(`O e-mail "${cleanEmail}" já está vinculado ao motorista ${duplicateEmail.name}.`);
+      return;
+    }
+
+    setIsSavingDriver(true);
+    try {
+      if (editingDriver) {
+        await updateDriver({
+          ...editingDriver,
+          ...newDriver,
+          name: cleanName,
+          cpf: cleanCpf,
+          loginEmail: cleanEmail,
+          password: cleanPassword || editingDriver.password,
+        });
+        setDriverFeedback(
+          `Cadastro e credenciais de ${cleanName} atualizados (${cleanEmail} · acesso ${newDriver.active ? 'ATIVO' : 'BLOQUEADO'}).`
+        );
+      } else {
+        await createDriver({
+          ...newDriver,
+          name: cleanName,
+          cpf: cleanCpf,
+          loginEmail: cleanEmail,
+          password: cleanPassword,
+        });
+        setDriverFeedback(
+          `Motorista ${cleanName} cadastrado! Login: ${cleanEmail} | Senha: ${cleanPassword} (acesso exclusivo às funções de motorista).`
+        );
+      }
+      setIsDriverModalOpen(false);
+      setEditingDriver(null);
+      await onRefreshData();
+    } catch (err: any) {
+      setDriverFormError(err?.message || 'Erro ao salvar cadastro do motorista.');
+    } finally {
+      setIsSavingDriver(false);
+    }
+  };
+
+  const handleToggleDriverActive = async (d: Driver) => {
+    const nextActive = d.active === false;
+    await updateDriver({
+      ...d,
+      active: nextActive,
+    });
+    setDriverFeedback(
+      `Acesso de ${d.name} foi ${nextActive ? 'ATIVADO' : 'BLOQUEADO'} pelo administrador.`
+    );
+    await onRefreshData();
   };
 
   const handleCreateVehicle = async (e: React.FormEvent) => {
@@ -369,8 +602,46 @@ export function AdminDashboard({
     await createVehicle({
       ...newVehicle,
       plate: newVehicle.plate.toUpperCase().trim(),
+      lastPreventiveMaintenanceDate: newVehicle.lastOilChangeDate,
+      lastPreventiveMaintenanceKm: newVehicle.lastOilChangeKm,
+      nextPreventiveMaintenanceKm: newVehicle.nextPreventiveMaintenanceKm || newVehicle.nextOilChangeKm,
     });
     setIsVehicleModalOpen(false);
+    setVehicleFeedback(`Veículo ${newVehicle.plate.toUpperCase().trim()} cadastrado no monitoramento de quilometragem.`);
+    onRefreshData();
+  };
+
+  const handleSaveMileageConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedVehicleForMileage) return;
+    await updateVehicleMileageMonitor(
+      selectedVehicleForMileage.id,
+      mileageConfigForm.currentKm,
+      mileageConfigForm.nextPreventiveMaintenanceKm,
+      mileageConfigForm.nextOilChangeKm
+    );
+    setVehicleFeedback(
+      `Monitoramento de quilometragem de ${selectedVehicleForMileage.plate} atualizado (Odômetro: ${mileageConfigForm.currentKm.toLocaleString('pt-BR')} km · Limite revisão: ${mileageConfigForm.nextPreventiveMaintenanceKm.toLocaleString('pt-BR')} km).`
+    );
+    setIsMileageConfigModalOpen(false);
+    setSelectedVehicleForMileage(null);
+    onRefreshData();
+  };
+
+  const handlePerformPreventiveMaintenance = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedVehicleForPreventive) return;
+    await recordPreventiveMaintenance(
+      selectedVehicleForPreventive.id,
+      preventiveForm.currentKm,
+      preventiveForm.intervalKm,
+      preventiveForm.cost
+    );
+    setVehicleFeedback(
+      `Revisão preventiva de ${selectedVehicleForPreventive.plate} registrada aos ${preventiveForm.currentKm.toLocaleString('pt-BR')} km! Próximo limite: ${(preventiveForm.currentKm + preventiveForm.intervalKm).toLocaleString('pt-BR')} km.`
+    );
+    setIsPreventiveModalOpen(false);
+    setSelectedVehicleForPreventive(null);
     onRefreshData();
   };
 
@@ -399,7 +670,8 @@ export function AdminDashboard({
       selectedVehicleForOil.id,
       oilChangeForm.currentKm,
       oilChangeForm.intervalKm,
-      oilChangeForm.filtersReplaced
+      oilChangeForm.filtersReplaced,
+      oilChangeForm.cost
     );
     setIsOilChangeModalOpen(false);
     setSelectedVehicleForOil(null);
@@ -482,6 +754,12 @@ export function AdminDashboard({
         case 'payment':
           await deletePayment(deleteTarget.id);
           break;
+        case 'checklist':
+          await deleteVehicleChecklist(deleteTarget.id);
+          break;
+        case 'tripRequest':
+          await deleteTripRequest(deleteTarget.id);
+          break;
       }
       await onRefreshData();
       setDeleteFeedback({
@@ -497,6 +775,54 @@ export function AdminDashboard({
       });
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleOpenTripDispatchModal = () => {
+    const defaultDriver = drivers.find((d) => d.active !== false) || drivers[0];
+    setTripDispatchForm({
+      driverId: defaultDriver?.id || '',
+      vehicleId: defaultDriver?.vehicleId || vehicles[0]?.id || '',
+      origin: 'Campinas, SP',
+      destination: '',
+      cargoDescription: '',
+      estimatedFreight: 850,
+      scheduledDate: new Date().toISOString().slice(0, 10),
+      priority: 'normal',
+      notes: '',
+    });
+    setIsTripDispatchModalOpen(true);
+  };
+
+  const handleDispatchTrip = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const drv = drivers.find((d) => d.id === tripDispatchForm.driverId);
+    const veh = vehicles.find((v) => v.id === tripDispatchForm.vehicleId) || vehicles[0];
+    if (!drv || !veh) return;
+
+    setIsDispatchingTrip(true);
+    try {
+      await createTripRequest({
+        driverId: drv.id,
+        driverName: drv.name,
+        vehicleId: veh.id,
+        vehiclePlate: veh.plate,
+        origin: tripDispatchForm.origin.trim(),
+        destination: tripDispatchForm.destination.trim(),
+        cargoDescription: tripDispatchForm.cargoDescription.trim(),
+        estimatedFreight: Number(tripDispatchForm.estimatedFreight) || 0,
+        scheduledDate: tripDispatchForm.scheduledDate,
+        priority: tripDispatchForm.priority,
+        notes: tripDispatchForm.notes.trim() || undefined,
+        createdByAdminEmail: adminProfile.email,
+      });
+      setTripDispatchFeedback(
+        `Solicitação de viagem enviada para ${drv.name} (${tripDispatchForm.origin} → ${tripDispatchForm.destination}). O motorista receberá o alerta sonoro no portal.`
+      );
+      setIsTripDispatchModalOpen(false);
+      await onRefreshData();
+    } finally {
+      setIsDispatchingTrip(false);
     }
   };
 
@@ -531,6 +857,45 @@ export function AdminDashboard({
   // Check vehicles with oil alerts (< 200 km)
   const vehiclesWithOilAlert = vehicles.filter((v) => (v.nextOilChangeKm - v.currentKm) <= 200);
 
+  // Mileage monitoring statuses for preventive maintenance limits
+  const vehicleMileageStatuses = useMemo(() => {
+    return vehicles
+      .map((v) => checkVehiclePreventiveStatus(v))
+      .sort((a, b) => {
+        if (a.isExceeded !== b.isExceeded) return a.isExceeded ? -1 : 1;
+        if (a.isWarning !== b.isWarning) return a.isWarning ? -1 : 1;
+        return a.remainingKm - b.remainingKm;
+      });
+  }, [vehicles]);
+
+  const exceededMileageVehicles = useMemo(() => {
+    return vehicleMileageStatuses.filter((s) => s.isExceeded);
+  }, [vehicleMileageStatuses]);
+
+  const warningMileageVehicles = useMemo(() => {
+    return vehicleMileageStatuses.filter((s) => s.isWarning);
+  }, [vehicleMileageStatuses]);
+
+  const vehiclesAttentionCount = useMemo(() => {
+    const ids = new Set<string>();
+    exceededMileageVehicles.forEach((s) => ids.add(s.vehicle.id));
+    vehiclesWithOilAlert.forEach((v) => ids.add(v.id));
+    return ids.size;
+  }, [exceededMileageVehicles, vehiclesWithOilAlert]);
+
+  // Check open checklists with anomalies
+  const openAnomalyChecklists = useMemo(() => {
+    return checklists.filter(
+      (c) =>
+        c.anomaliesCount > 0 &&
+        (c.resolutionStatus === 'pending_review' || c.resolutionStatus === 'in_maintenance')
+    );
+  }, [checklists]);
+
+  const criticalAnomalyChecklists = useMemo(() => {
+    return openAnomalyChecklists.filter((c) => c.criticalAnomaliesCount > 0);
+  }, [openAnomalyChecklists]);
+
   // Somente usuários cadastrados no Supabase com role 'admin' têm acesso ao painel
   if (adminProfile.role !== 'admin') {
     return (
@@ -541,7 +906,7 @@ export function AdminDashboard({
         <div className="space-y-1.5">
           <h3 className="text-lg font-bold text-slate-100">Acesso Restrito ao Painel do Administrador</h3>
           <p className="text-xs text-slate-400 leading-relaxed max-w-md mx-auto">
-            Somente os usuários cadastrados no Supabase com perfil de Administrador têm acesso a este painel com todas as funções de gestão, relatórios financeiros e exclusão de dados.
+            Somente os usuários cadastrados com perfil de Administrador têm acesso a este painel com todas as funções de gestão, relatórios financeiros e exclusão de dados.
           </p>
         </div>
         <div className="pt-2">
@@ -559,7 +924,8 @@ export function AdminDashboard({
         {[
           { id: 'dashboard', label: 'Dashboard & Faturamento', icon: LayoutDashboard },
           { id: 'reports', label: 'Relatórios Diários', icon: FileText, badge: dailyReports.filter((r) => r.status === 'submitted').length },
-          { id: 'vehicles', label: 'Veículos & Óleo', icon: Truck, alertBadge: vehiclesWithOilAlert.length },
+          { id: 'checklists', label: 'Checklist & Anomalias', icon: ClipboardCheck, alertBadge: openAnomalyChecklists.length },
+          { id: 'vehicles', label: 'Veículos & Revisão', icon: Truck, alertBadge: vehiclesAttentionCount },
           { id: 'drivers', label: 'Motoristas', icon: Users, alertBadge: driversWithCnhAlert.length },
           { id: 'rates', label: 'Diárias', icon: Receipt },
           { id: 'tolls', label: 'Pedágios', icon: DollarSign },
@@ -646,7 +1012,16 @@ export function AdminDashboard({
             </select>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleOpenTripDispatchModal}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded text-xs font-bold transition-colors shadow-sm"
+              title="Enviar nova solicitação de viagem com alerta sonoro para o motorista"
+            >
+              <Navigation className="w-3.5 h-3.5" />
+              <span>Despachar Viagem</span>
+            </button>
+
             <button
               onClick={() => setIsDeleteManagerOpen(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 rounded border border-rose-500/30 text-xs font-semibold transition-colors"
@@ -876,6 +1251,71 @@ export function AdminDashboard({
             </div>
           )}
 
+          {/* ALERTA PRIORITÁRIO DE MONITORAMENTO DE QUILOMETRAGEM: REVISÃO PREVENTIVA ULTRAPASSADA */}
+          {exceededMileageVehicles.length > 0 && (
+            <div className="bg-gradient-to-r from-rose-950/50 via-slate-900 to-rose-950/25 border-2 border-rose-500/80 p-5 rounded-2xl shadow-xl shadow-rose-950/30 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/50 flex items-center justify-center text-rose-400 shrink-0">
+                    <AlertOctagon className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-sm font-bold text-rose-100 uppercase tracking-wide flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 text-rose-400" />
+                        Monitoramento de Quilometragem: Revisão Preventiva Ultrapassada
+                      </h4>
+                      <span className="px-2 py-0.5 rounded-full bg-rose-500 text-white font-mono text-[10px] font-bold">
+                        {exceededMileageVehicles.length} veículo{exceededMileageVehicles.length > 1 ? 's' : ''} acima do limite
+                      </span>
+                    </div>
+                    <p className="text-xs text-rose-200/80 mt-0.5">
+                      Os caminhões abaixo ultrapassaram o limite de quilometragem configurado para a próxima revisão preventiva. Agende a revisão imediatamente.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setVehicleMonitorFilter('exceeded');
+                    setActiveTab('vehicles');
+                  }}
+                  className="px-3.5 py-2 bg-rose-500 hover:bg-rose-400 text-white font-bold rounded-xl text-xs transition-colors shadow-sm flex items-center gap-1.5 self-start sm:self-auto shrink-0"
+                >
+                  <Gauge className="w-4 h-4" />
+                  <span>Monitorar Quilometragem</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-1">
+                {exceededMileageVehicles.map(({ vehicle, currentKm, limitKm, exceededKm }) => (
+                  <div
+                    key={vehicle.id}
+                    className="bg-slate-950/85 border border-rose-500/50 rounded-xl p-3.5 flex flex-col justify-between space-y-2"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <AlertTriangle className="w-4 h-4 text-rose-400 animate-pulse shrink-0" />
+                          <strong className="text-slate-100 font-mono text-sm">{vehicle.plate}</strong>
+                        </div>
+                        <span className="text-[11px] text-slate-400 block">{vehicle.model}</span>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-rose-500 text-white font-mono text-[10px] font-bold shrink-0">
+                        +{exceededKm.toLocaleString('pt-BR')} km
+                      </span>
+                    </div>
+
+                    <div className="text-[11px] text-slate-300 flex items-center justify-between border-t border-slate-900 pt-2 font-mono">
+                      <span>Atual: <strong className="text-rose-300">{currentKm.toLocaleString('pt-BR')} km</strong></span>
+                      <span>Limite: <strong className="text-slate-200">{limitKm.toLocaleString('pt-BR')} km</strong></span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Urgent Maintenance & Oil Alerts Banner */}
           {vehiclesWithOilAlert.length > 0 && (
             <div className="bg-orange-950/30 border border-orange-500/50 p-4 rounded-xl flex items-center justify-between gap-4">
@@ -899,6 +1339,66 @@ export function AdminDashboard({
               </button>
             </div>
           )}
+
+          {/* Priority Alert: Open Vehicle Checklist Anomalies */}
+          {openAnomalyChecklists.length > 0 && (
+            <div
+              className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                criticalAnomalyChecklists.length > 0
+                  ? 'bg-rose-950/35 border-rose-500/60'
+                  : 'bg-amber-950/30 border-amber-500/50'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <ClipboardCheck
+                  className={`w-5 h-5 shrink-0 ${
+                    criticalAnomalyChecklists.length > 0 ? 'text-rose-400' : 'text-amber-400'
+                  }`}
+                />
+                <div className="text-xs">
+                  <strong
+                    className={
+                      criticalAnomalyChecklists.length > 0 ? 'text-rose-200' : 'text-amber-200'
+                    }
+                  >
+                    Checklist de Frota: {openAnomalyChecklists.length} inspeção(ões) com anomalias em aberto
+                    {criticalAnomalyChecklists.length > 0
+                      ? ` (${criticalAnomalyChecklists.length} crítica${criticalAnomalyChecklists.length > 1 ? 's' : ''})`
+                      : ''}
+                    !
+                  </strong>
+                  <div className="text-slate-300/80">
+                    {openAnomalyChecklists
+                      .slice(0, 3)
+                      .map((c) => `${c.vehiclePlate} (${c.driverName}: ${c.anomaliesCount} anomalia${c.anomaliesCount > 1 ? 's' : ''})`)
+                      .join(' · ')}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setActiveTab('checklists')}
+                className={`px-3.5 py-1.5 font-bold rounded-lg text-xs shrink-0 self-start sm:self-auto ${
+                  criticalAnomalyChecklists.length > 0
+                    ? 'bg-rose-500 hover:bg-rose-400 text-white'
+                    : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                }`}
+              >
+                Analisar Anomalias
+              </button>
+            </div>
+          )}
+
+          {/* Gráfico Recharts: Comparativo Mensal de Custos Operacionais */}
+          <MonthlyCostsChart
+            dailyReports={dailyReports}
+            tolls={tolls}
+            maintenanceRecords={maintenanceRecords}
+            drivers={drivers}
+            vehicles={vehicles}
+            selectedDriverFilter={selectedDriverFilter}
+            selectedVehicleFilter={selectedVehicleFilter}
+          />
 
           {/* Recent Reports submitted by drivers */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
@@ -956,6 +1456,111 @@ export function AdminDashboard({
                 </div>
               ))}
             </div>
+          </div>
+
+          {/* Solicitações de Viagens Despachadas aos Motoristas */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                  <Navigation className="w-4 h-4 text-amber-400" />
+                  Solicitações de Viagens Despachadas
+                </h4>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Envie novas viagens para acionar notificações sonoras imediatas no painel do motorista
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleOpenTripDispatchModal}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Nova Solicitação de Viagem</span>
+              </button>
+            </div>
+
+            {tripDispatchFeedback && (
+              <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 text-xs flex items-center justify-between gap-2">
+                <span>{tripDispatchFeedback}</span>
+                <button
+                  type="button"
+                  onClick={() => setTripDispatchFeedback(null)}
+                  className="text-emerald-400 hover:text-emerald-200 font-bold"
+                >
+                  Fechar
+                </button>
+              </div>
+            )}
+
+            {tripRequests.length === 0 ? (
+              <div className="p-5 bg-slate-950 border border-slate-800 rounded-xl text-center text-xs text-slate-400">
+                Nenhuma solicitação de viagem despachada ainda. Clique em &quot;Nova Solicitação de Viagem&quot; para enviar uma rota ao motorista.
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {tripRequests.slice(0, 6).map((trip) => (
+                  <div
+                    key={trip.id}
+                    className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <strong className="text-slate-100">
+                          {trip.origin} → {trip.destination}
+                        </strong>
+                        <span className="text-slate-500">·</span>
+                        <span className="font-mono text-amber-400 font-semibold">{trip.vehiclePlate}</span>
+                        <span className="text-slate-500">·</span>
+                        <span className="text-slate-300">{trip.driverName}</span>
+                      </div>
+                      <div className="text-slate-400">
+                        {trip.cargoDescription} · Data: {trip.scheduledDate.split('-').reverse().join('/')} · Frete est.: R$ {trip.estimatedFreight.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                          trip.status === 'pending'
+                            ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                            : trip.status === 'accepted' || trip.status === 'in_progress'
+                            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                            : trip.status === 'rejected'
+                            ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                            : 'bg-slate-800 border-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {trip.status === 'pending'
+                          ? 'Pendente'
+                          : trip.status === 'accepted'
+                          ? 'Aceita'
+                          : trip.status === 'in_progress'
+                          ? 'Em Rota'
+                          : trip.status === 'rejected'
+                          ? 'Recusada'
+                          : 'Concluída'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDeleteTarget({
+                            type: 'tripRequest',
+                            id: trip.id,
+                            title: `Excluir Solicitação de Viagem (${trip.origin} → ${trip.destination})`,
+                            description: `Tem certeza que deseja excluir esta solicitação enviada para ${trip.driverName}?`,
+                          })
+                        }
+                        className="p-1.5 text-slate-500 hover:text-rose-400 transition-colors"
+                        title="Excluir solicitação"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1142,124 +1747,402 @@ export function AdminDashboard({
         </div>
       )}
 
-      {/* TAB 3: VEÍCULOS & ALERTA DE ÓLEO (Section 4) */}
+      {/* TAB 3: VEÍCULOS, MONITORAMENTO DE QUILOMETRAGEM & REVISÃO PREVENTIVA */}
       {activeTab === 'vehicles' && (
-        <div className="space-y-4">
+        <div className="space-y-5">
+          {/* Header */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-slate-900 border border-slate-800 p-4 rounded-xl">
             <div>
               <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                <Truck className="w-4 h-4 text-amber-400" />
-                Cadastro e Controle de Manutenção dos Veículos
+                <Gauge className="w-4 h-4 text-amber-400" />
+                Monitoramento de Quilometragem & Revisão Preventiva da Frota
               </h4>
               <p className="text-xs text-slate-400">
-                Alerta automático de troca de óleo com limite de 200 km
+                Acompanhe os limites configurados para revisão preventiva, troca de óleo e identifique veículos com quilometragem excedida
               </p>
             </div>
 
             <button
               onClick={() => setIsVehicleModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-sm"
+              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-sm shrink-0"
             >
               <Plus className="w-4 h-4" />
               <span>Cadastrar Veículo</span>
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {vehicles.map((v) => {
-              const kmLeft = v.nextOilChangeKm - v.currentKm;
-              const isUrgent = kmLeft <= 200;
+          {vehicleFeedback && (
+            <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/50 text-emerald-200 text-xs flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{vehicleFeedback}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVehicleFeedback(null)}
+                className="text-slate-400 hover:text-slate-200 px-2"
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
+          {/* Mileage Monitoring Summary KPIs */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
+              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Truck className="w-3.5 h-3.5 text-amber-400" />
+                Frota Monitorada
+              </span>
+              <div className="text-2xl font-bold font-mono text-slate-100 mt-1">
+                {vehicles.length}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-0.5">Veículos com odômetro ativo</div>
+            </div>
+
+            <div className={`p-4 rounded-2xl border ${exceededMileageVehicles.length > 0 ? 'bg-rose-950/25 border-rose-500/60' : 'bg-slate-900 border-slate-800'}`}>
+              <span className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
+                <AlertOctagon className={`w-3.5 h-3.5 text-rose-400 ${exceededMileageVehicles.length > 0 ? 'animate-pulse' : ''}`} />
+                Limite Ultrapassado
+              </span>
+              <div className="text-2xl font-bold font-mono text-rose-400 mt-1">
+                {exceededMileageVehicles.length}
+              </div>
+              <div className="text-[10px] text-rose-300/70 mt-0.5">Revisão preventiva vencida</div>
+            </div>
+
+            <div className={`p-4 rounded-2xl border ${warningMileageVehicles.length > 0 ? 'bg-amber-950/25 border-amber-500/50' : 'bg-slate-900 border-slate-800'}`}>
+              <span className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                Próximos (≤ 1.000 km)
+              </span>
+              <div className="text-2xl font-bold font-mono text-amber-400 mt-1">
+                {warningMileageVehicles.length}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-0.5">Aproximando-se da revisão</div>
+            </div>
+
+            <div className="bg-slate-900 border border-emerald-500/30 p-4 rounded-2xl">
+              <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                Dentro do Limite
+              </span>
+              <div className="text-2xl font-bold font-mono text-emerald-400 mt-1">
+                {vehicleMileageStatuses.filter((s) => !s.isExceeded && !s.isWarning).length}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-0.5">Quilometragem regular</div>
+            </div>
+          </div>
+
+          {/* Filter Pills */}
+          <div className="flex flex-wrap items-center gap-2 bg-slate-900 border border-slate-800 p-2 rounded-xl text-xs font-semibold">
+            <button
+              type="button"
+              onClick={() => setVehicleMonitorFilter('all')}
+              className={`px-3 py-1.5 rounded-lg transition-colors ${
+                vehicleMonitorFilter === 'all'
+                  ? 'bg-amber-500 text-slate-950 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Todos ({vehicles.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setVehicleMonitorFilter('exceeded')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                vehicleMonitorFilter === 'exceeded'
+                  ? 'bg-rose-500 text-white font-bold'
+                  : 'text-rose-300 hover:bg-rose-950/40'
+              }`}
+            >
+              <AlertOctagon className="w-3.5 h-3.5" />
+              <span>Limite Ultrapassado ({exceededMileageVehicles.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setVehicleMonitorFilter('warning')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                vehicleMonitorFilter === 'warning'
+                  ? 'bg-amber-500 text-slate-950 font-bold'
+                  : 'text-amber-300 hover:bg-amber-950/30'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Em Alerta / Próximos ({warningMileageVehicles.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setVehicleMonitorFilter('ok')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                vehicleMonitorFilter === 'ok'
+                  ? 'bg-emerald-500 text-slate-950 font-bold'
+                  : 'text-emerald-300 hover:bg-emerald-950/30'
+              }`}
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Regulares</span>
+            </button>
+          </div>
+
+          {/* Vehicle Cards Grid */}
+          {(() => {
+            const displayedStatuses = vehicleMileageStatuses.filter((status) => {
+              if (vehicleMonitorFilter === 'exceeded') return status.isExceeded;
+              if (vehicleMonitorFilter === 'warning') return status.isWarning || (status.vehicle.nextOilChangeKm - status.currentKm) <= 200;
+              if (vehicleMonitorFilter === 'ok') return !status.isExceeded && !status.isWarning;
+              return true;
+            });
+
+            if (displayedStatuses.length === 0) {
               return (
-                <div
-                  key={v.id}
-                  className={`bg-slate-900 border rounded-2xl p-5 space-y-4 shadow-sm flex flex-col justify-between ${
-                    isUrgent ? 'border-orange-500/80 bg-orange-950/20' : 'border-slate-800'
-                  }`}
-                >
-                  <div className="space-y-3">
-                    <div className="flex items-start justify-between">
-                      <MercosulPlate plate={v.plate} size="md" />
-                      {isUrgent && (
-                        <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-orange-500 text-slate-950 animate-pulse">
-                          ÓLEO URGENTE
-                        </span>
-                      )}
-                    </div>
-
-                    <div>
-                      <h4 className="text-base font-bold text-slate-100">{v.model}</h4>
-                      <p className="text-xs text-slate-400">
-                        Odômetro Atual: <strong className="font-mono text-slate-200">{v.currentKm.toLocaleString('pt-BR')} km</strong>
-                      </p>
-                    </div>
-
-                    {/* Oil Maintenance Box */}
-                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs">
-                      <div className="flex justify-between text-slate-400">
-                        <span>Última Troca:</span>
-                        <span className="font-mono text-slate-200">
-                          {v.lastOilChangeDate.split('-').reverse().join('/')} ({v.lastOilChangeKm.toLocaleString('pt-BR')} km)
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between text-slate-400">
-                        <span>Próxima Troca:</span>
-                        <span className={`font-mono font-bold ${isUrgent ? 'text-orange-400' : 'text-slate-200'}`}>
-                          {v.nextOilChangeKm.toLocaleString('pt-BR')} km
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between text-slate-400">
-                        <span>Faltam:</span>
-                        <span className={`font-mono font-bold ${isUrgent ? 'text-orange-400' : 'text-emerald-400'}`}>
-                          {kmLeft <= 0 ? 'VENCIDA!' : `${kmLeft.toLocaleString('pt-BR')} km`}
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between text-slate-400">
-                        <span>Filtros Trocados:</span>
-                        <span className="font-bold text-slate-300">
-                          {v.filtersReplaced ? 'SIM' : 'NÃO'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="pt-2 border-t border-slate-800 flex justify-between items-center">
-                    <button
-                      onClick={() => setDeleteTarget({
-                        type: 'vehicle',
-                        id: v.id,
-                        title: `Excluir Veículo ${v.plate}`,
-                        description: `Tem certeza que deseja excluir o veículo ${v.plate} (${v.model})? O veículo será removido permanentemente do banco de dados.`,
-                      })}
-                      className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
-                      title="Excluir veículo"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setSelectedVehicleForOil(v);
-                        setOilChangeForm({
-                          currentKm: v.currentKm,
-                          intervalKm: 20000,
-                          filtersReplaced: true,
-                        });
-                        setIsOilChangeModalOpen(true);
-                      }}
-                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-400 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"
-                    >
-                      <Wrench className="w-3.5 h-3.5" />
-                      <span>Registrar Nova Troca de Óleo</span>
-                    </button>
-                  </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-xs text-slate-400">
+                  Nenhum veículo encontrado neste filtro de monitoramento.
                 </div>
               );
-            })}
-          </div>
+            }
+
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {displayedStatuses.map(({ vehicle: v, currentKm, limitKm, remainingKm, exceededKm, isExceeded, isWarning, progressPercent }) => {
+                  const oilKmLeft = v.nextOilChangeKm - currentKm;
+                  const isOilUrgent = oilKmLeft <= 200;
+
+                  return (
+                    <div
+                      key={v.id}
+                      className={`rounded-2xl p-5 space-y-4 shadow-sm flex flex-col justify-between transition-all ${
+                        isExceeded
+                          ? 'bg-rose-950/20 border-2 border-rose-500 shadow-lg shadow-rose-950/40'
+                          : isWarning || isOilUrgent
+                          ? 'bg-orange-950/20 border-2 border-orange-500/80'
+                          : 'bg-slate-900 border border-slate-800'
+                      }`}
+                    >
+                      <div className="space-y-3">
+                        {/* Plate + Attention Badges */}
+                        <div className="flex items-start justify-between gap-2">
+                          <MercosulPlate plate={v.plate} size="md" />
+                          <div className="flex flex-col items-end gap-1">
+                            {isExceeded ? (
+                              <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-rose-500 text-white flex items-center gap-1 shadow-md animate-pulse">
+                                <AlertOctagon className="w-3.5 h-3.5 shrink-0" />
+                                <span>REVISÃO ULTRAPASSADA</span>
+                              </span>
+                            ) : isWarning ? (
+                              <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1">
+                                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                <span>REVISÃO PRÓXIMA</span>
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3" />
+                                <span>OK</span>
+                              </span>
+                            )}
+
+                            {isOilUrgent && (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-orange-500 text-slate-950 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                <span>ÓLEO URGENTE</span>
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div>
+                          <h4 className="text-base font-bold text-slate-100">{v.model}</h4>
+                          <p className="text-xs text-slate-400 flex items-center gap-1.5 mt-0.5">
+                            <Gauge className={`w-3.5 h-3.5 ${isExceeded ? 'text-rose-400' : 'text-amber-400'}`} />
+                            <span>Odômetro Atual:</span>
+                            <strong className={`font-mono ${isExceeded ? 'text-rose-300' : 'text-slate-100'}`}>
+                              {currentKm.toLocaleString('pt-BR')} km
+                            </strong>
+                          </p>
+                        </div>
+
+                        {/* Overdue Callout Banner inside Card */}
+                        {isExceeded && (
+                          <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/50 flex items-center gap-2 text-xs text-rose-200">
+                            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 animate-bounce" />
+                            <div>
+                              <strong className="block text-rose-100">Limite Preventivo Excedido!</strong>
+                              <span className="font-mono text-[11px] text-rose-300">
+                                +{exceededKm.toLocaleString('pt-BR')} km acima do limite de {limitKm.toLocaleString('pt-BR')} km
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Preventive Maintenance Progress Bar */}
+                        <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2.5 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1">
+                              {isExceeded ? (
+                                <AlertOctagon className="w-3.5 h-3.5 text-rose-400" />
+                              ) : isWarning ? (
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                              ) : (
+                                <Gauge className="w-3.5 h-3.5 text-emerald-400" />
+                              )}
+                              Revisão Preventiva
+                            </span>
+                            <span
+                              className={`font-mono font-bold text-[11px] ${
+                                isExceeded
+                                  ? 'text-rose-400'
+                                  : isWarning
+                                  ? 'text-amber-400'
+                                  : 'text-emerald-400'
+                              }`}
+                            >
+                              {isExceeded
+                                ? `EXCEDEU ${exceededKm.toLocaleString('pt-BR')} km`
+                                : remainingKm === 0
+                                ? 'LIMITE ATINGIDO'
+                                : `Faltam ${remainingKm.toLocaleString('pt-BR')} km`}
+                            </span>
+                          </div>
+
+                          <div className="w-full h-2.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
+                            <div
+                              className={`h-full transition-all duration-300 ${
+                                isExceeded
+                                  ? 'bg-rose-500'
+                                  : isWarning
+                                  ? 'bg-amber-500'
+                                  : 'bg-emerald-500'
+                              }`}
+                              style={{ width: `${progressPercent}%` }}
+                            />
+                          </div>
+
+                          <div className="flex justify-between text-[11px] text-slate-400 font-mono">
+                            <span>Limite Configurado:</span>
+                            <strong className={isExceeded ? 'text-rose-300' : 'text-slate-200'}>
+                              {limitKm.toLocaleString('pt-BR')} km
+                            </strong>
+                          </div>
+
+                          {v.lastPreventiveMaintenanceDate && (
+                            <div className="flex justify-between text-[11px] text-slate-500">
+                              <span>Última Revisão:</span>
+                              <span className="font-mono">
+                                {v.lastPreventiveMaintenanceDate.split('-').reverse().join('/')}
+                                {typeof v.lastPreventiveMaintenanceKm === 'number'
+                                  ? ` (${v.lastPreventiveMaintenanceKm.toLocaleString('pt-BR')} km)`
+                                  : ''}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Oil Maintenance Box */}
+                        <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1.5 text-xs">
+                          <div className="flex justify-between text-slate-400">
+                            <span>Última Troca de Óleo:</span>
+                            <span className="font-mono text-slate-200">
+                              {v.lastOilChangeDate.split('-').reverse().join('/')} ({v.lastOilChangeKm.toLocaleString('pt-BR')} km)
+                            </span>
+                          </div>
+
+                          <div className="flex justify-between text-slate-400">
+                            <span>Próxima Troca de Óleo:</span>
+                            <span className={`font-mono font-bold ${isOilUrgent ? 'text-orange-400' : 'text-slate-200'}`}>
+                              {v.nextOilChangeKm.toLocaleString('pt-BR')} km ({oilKmLeft <= 0 ? 'VENCIDA!' : `faltam ${oilKmLeft.toLocaleString('pt-BR')} km`})
+                            </span>
+                          </div>
+
+                          <div className="flex justify-between text-slate-400">
+                            <span>Filtros Trocados:</span>
+                            <span className="font-bold text-slate-300">
+                              {v.filtersReplaced ? 'SIM' : 'NÃO'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => setDeleteTarget({
+                              type: 'vehicle',
+                              id: v.id,
+                              title: `Excluir Veículo ${v.plate}`,
+                              description: `Tem certeza que deseja excluir o veículo ${v.plate} (${v.model})? O veículo será removido permanentemente do banco de dados.`,
+                            })}
+                            className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
+                            title="Excluir veículo"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedVehicleForMileage(v);
+                              setMileageConfigForm({
+                                currentKm: v.currentKm,
+                                nextPreventiveMaintenanceKm: v.nextPreventiveMaintenanceKm ?? v.nextOilChangeKm,
+                                nextOilChangeKm: v.nextOilChangeKm,
+                              });
+                              setIsMileageConfigModalOpen(true);
+                            }}
+                            className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-colors border border-slate-700"
+                            title="Atualizar odômetro e limite da próxima revisão preventiva"
+                          >
+                            <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Km / Limite</span>
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedVehicleForPreventive(v);
+                              setPreventiveForm({
+                                currentKm: v.currentKm,
+                                intervalKm: v.preventiveIntervalKm || 20000,
+                                cost: 0,
+                              });
+                              setIsPreventiveModalOpen(true);
+                            }}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors ${
+                              isExceeded
+                                ? 'bg-rose-500 hover:bg-rose-400 text-white shadow-sm'
+                                : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30'
+                            }`}
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>Registrar Revisão</span>
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setSelectedVehicleForOil(v);
+                              setOilChangeForm({
+                                currentKm: v.currentKm,
+                                intervalKm: 20000,
+                                filtersReplaced: true,
+                                cost: 0,
+                              });
+                              setIsOilChangeModalOpen(true);
+                            }}
+                            className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-400 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-colors"
+                            title="Registrar troca de óleo"
+                          >
+                            <Wrench className="w-3.5 h-3.5" />
+                            <span>Óleo</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1270,10 +2153,10 @@ export function AdminDashboard({
             <div>
               <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                 <Users className="w-4 h-4 text-amber-400" />
-                Cadastro e Gestão de Motoristas
+                Cadastro, Credenciais & Gestão de Motoristas
               </h4>
               <p className="text-xs text-slate-400">
-                Controle de CNH, identificador único e veículo vinculado
+                Crie login e senha individuais para que cada motorista acesse exclusivamente o Portal do Motorista
               </p>
             </div>
 
@@ -1308,7 +2191,7 @@ export function AdminDashboard({
               </div>
 
               <button
-                onClick={() => setIsDriverModalOpen(true)}
+                onClick={openCreateDriverModal}
                 className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-sm"
               >
                 <Plus className="w-4 h-4" />
@@ -1316,6 +2199,22 @@ export function AdminDashboard({
               </button>
             </div>
           </div>
+
+          {driverFeedback && (
+            <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/50 text-emerald-200 text-xs flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{driverFeedback}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDriverFeedback(null)}
+                className="text-slate-400 hover:text-slate-200 px-2"
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
           {/* List of displayed drivers */}
           {(() => {
@@ -1336,12 +2235,16 @@ export function AdminDashboard({
                 {displayedDrivers.map((d) => {
                   const truck = vehicles.find((v) => v.id === d.vehicleId);
                   const cnhStatus = checkDriverCnhStatus(d);
+                  const isActive = d.active !== false;
+                  const isPwdRevealed = !!revealedPasswordIds[d.id];
 
                   return (
                     <div
                       key={d.id}
                       className={`bg-slate-900 rounded-2xl p-5 space-y-4 shadow-sm flex flex-col justify-between transition-all ${
-                        cnhStatus.isCritical
+                        !isActive
+                          ? 'border border-slate-700 opacity-80'
+                          : cnhStatus.isCritical
                           ? 'border-2 border-rose-500/80 bg-rose-950/15 shadow-rose-950/30'
                           : 'border border-slate-800'
                       }`}
@@ -1361,6 +2264,15 @@ export function AdminDashboard({
                           </div>
 
                           <div className="flex flex-col items-end gap-1">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                isActive
+                                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                  : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                              }`}
+                            >
+                              {isActive ? 'Acesso Ativo' : 'Bloqueado'}
+                            </span>
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-400 border border-blue-500/20">
                               CNH Cat. {d.cnhCategory}
                             </span>
@@ -1413,28 +2325,72 @@ export function AdminDashboard({
                             </div>
                           )}
                           {d.loginEmail && (
-                            <div className="flex justify-between text-slate-400">
-                              <span>Login:</span>
-                              <span className="font-mono text-amber-400">{d.loginEmail}</span>
+                            <div className="flex justify-between text-slate-400 pt-1 border-t border-slate-900">
+                              <span>Login Motorista:</span>
+                              <span className="font-mono text-amber-400 truncate max-w-[170px]">{d.loginEmail}</span>
+                            </div>
+                          )}
+                          {d.password && (
+                            <div className="flex justify-between items-center text-slate-400">
+                              <span>Senha:</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono text-slate-200">
+                                  {isPwdRevealed ? d.password : '••••••••'}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setRevealedPasswordIds((prev) => ({ ...prev, [d.id]: !prev[d.id] }))
+                                  }
+                                  className="text-slate-500 hover:text-amber-400"
+                                  title={isPwdRevealed ? 'Ocultar senha' : 'Mostrar senha'}
+                                >
+                                  {isPwdRevealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                </button>
+                              </div>
                             </div>
                           )}
                         </div>
                       </div>
 
-                      <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
-                        <span className="text-slate-500 truncate max-w-[200px]">{d.address}</span>
+                      <div className="pt-2 border-t border-slate-800 flex flex-wrap justify-between items-center gap-2 text-xs">
                         <button
-                          onClick={() => setDeleteTarget({
-                            type: 'driver',
-                            id: d.id,
-                            title: `Excluir Motorista ${d.name}`,
-                            description: `Tem certeza que deseja excluir o motorista ${d.name} (CPF: ${d.cpf}) e revogar suas credenciais de acesso?`,
-                          })}
-                          className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
-                          title="Excluir motorista"
+                          type="button"
+                          onClick={() => openEditDriverModal(d)}
+                          className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-400 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <Edit2 className="w-3.5 h-3.5" />
+                          <span>Editar / Credenciais</span>
                         </button>
+
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleDriverActive(d)}
+                            className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-colors ${
+                              isActive
+                                ? 'bg-slate-800 hover:bg-rose-950/50 text-slate-300 hover:text-rose-300'
+                                : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300'
+                            }`}
+                            title={isActive ? 'Bloquear acesso do motorista' : 'Reativar acesso do motorista'}
+                          >
+                            {isActive ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                            <span>{isActive ? 'Bloquear' : 'Ativar'}</span>
+                          </button>
+
+                          <button
+                            onClick={() => setDeleteTarget({
+                              type: 'driver',
+                              id: d.id,
+                              title: `Excluir Motorista ${d.name}`,
+                              description: `Tem certeza que deseja excluir o motorista ${d.name} (CPF: ${d.cpf}) e revogar suas credenciais de acesso?`,
+                            })}
+                            className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
+                            title="Excluir motorista"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -1915,15 +2871,45 @@ export function AdminDashboard({
 
 
 
-      {/* MODAL: CADASTRAR MOTORISTA (Section 3) */}
+      {/* TAB 10: CHECKLIST DE INSPEÇÃO & ANOMALIAS */}
+      {activeTab === 'checklists' && (
+        <AdminChecklistsView
+          checklists={checklists}
+          vehicles={vehicles}
+          drivers={drivers}
+          adminProfile={adminProfile}
+          onRefreshData={onRefreshData}
+          onRequestDelete={(chk) =>
+            setDeleteTarget({
+              type: 'checklist',
+              id: chk.id,
+              title: `Excluir Checklist (${chk.vehiclePlate})`,
+              description: `Tem certeza que deseja excluir o checklist realizado por ${chk.driverName} em ${chk.date}?`,
+            })
+          }
+        />
+      )}
+
+      {/* MODAL: CADASTRAR / EDITAR MOTORISTA E CREDENCIAIS (Section 3) */}
       <Modal
         isOpen={isDriverModalOpen}
-        onClose={() => setIsDriverModalOpen(false)}
-        title="Cadastrar Novo Motorista"
-        subtitle="Registro completo com RG, CPF, CNH, veículo e credenciais de acesso"
+        onClose={() => {
+          setIsDriverModalOpen(false);
+          setEditingDriver(null);
+          setDriverFormError(null);
+        }}
+        title={editingDriver ? `Editar Motorista: ${editingDriver.name}` : 'Cadastrar Novo Motorista'}
+        subtitle="O motorista cadastrado terá acesso exclusivamente às funções do Portal do Motorista"
         maxWidth="xl"
       >
-        <form onSubmit={handleCreateDriver} className="space-y-4">
+        <form onSubmit={handleSaveDriver} className="space-y-4">
+          {driverFormError && (
+            <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-500/50 text-rose-300 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{driverFormError}</span>
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-semibold text-slate-300 mb-1">Nome Completo *</label>
             <input
@@ -2018,29 +3004,6 @@ export function AdminDashboard({
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Login / E-mail</label>
-              <input
-                type="email"
-                placeholder="motorista@truckgestao.com"
-                value={newDriver.loginEmail}
-                onChange={(e) => setNewDriver({ ...newDriver, loginEmail: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Senha de Acesso (Seção 3) *</label>
-              <input
-                type="text"
-                placeholder="Ex: Trk#2026@"
-                value={newDriver.password}
-                onChange={(e) => setNewDriver({ ...newDriver, password: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
-              />
-            </div>
-            <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1">Telefone / WhatsApp</label>
               <input
                 type="text"
@@ -2052,19 +3015,87 @@ export function AdminDashboard({
             </div>
           </div>
 
+          {/* Dedicated Driver Credentials Box */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-amber-500/30 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                <KeyRound className="w-3.5 h-3.5" />
+                Credenciais de Acesso Exclusivo do Motorista
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                Perfil: Somente Motorista
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Login / E-mail de Acesso *</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="motorista@truckgestao.com"
+                  value={newDriver.loginEmail}
+                  onChange={(e) => setNewDriver({ ...newDriver, loginEmail: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Senha de Acesso {editingDriver ? '(deixe igual ou altere)' : '*'}
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    required={!editingDriver}
+                    placeholder="Ex: Trk@2026"
+                    value={newDriver.password}
+                    onChange={(e) => setNewDriver({ ...newDriver, password: e.target.value })}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleGenerateDriverPassword}
+                    className="px-2.5 py-2 bg-slate-800 hover:bg-slate-700 text-amber-400 rounded-lg text-[11px] font-semibold shrink-0 border border-slate-700"
+                  >
+                    Gerar
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 text-xs text-slate-300 pt-1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={newDriver.active}
+                onChange={(e) => setNewDriver({ ...newDriver, active: e.target.checked })}
+                className="rounded bg-slate-900 border-slate-700 text-amber-500"
+              />
+              <span>Acesso ativo (desmarque para bloquear o login deste motorista)</span>
+            </label>
+          </div>
+
           <div className="pt-4 border-t border-slate-800 flex justify-end gap-2">
             <button
               type="button"
-              onClick={() => setIsDriverModalOpen(false)}
+              onClick={() => {
+                setIsDriverModalOpen(false);
+                setEditingDriver(null);
+              }}
               className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs"
             >
               Cancelar
             </button>
             <button
               type="submit"
-              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs"
+              disabled={isSavingDriver}
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs disabled:opacity-50"
             >
-              Salvar Motorista
+              {isSavingDriver
+                ? 'Salvando...'
+                : editingDriver
+                ? 'Atualizar Motorista & Credenciais'
+                : 'Cadastrar Motorista'}
             </button>
           </div>
         </form>
@@ -2075,7 +3106,7 @@ export function AdminDashboard({
         isOpen={isVehicleModalOpen}
         onClose={() => setIsVehicleModalOpen(false)}
         title="Cadastrar Novo Veículo"
-        subtitle="Registro de caminhão com quilometragem e intervalo de troca de óleo"
+        subtitle="Registro de caminhão com quilometragem, limite de revisão preventiva e troca de óleo"
         maxWidth="xl"
       >
         <form onSubmit={handleCreateVehicle} className="space-y-4">
@@ -2105,7 +3136,7 @@ export function AdminDashboard({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1">Km Atual *</label>
               <input
@@ -2113,6 +3144,16 @@ export function AdminDashboard({
                 required
                 value={newVehicle.currentKm}
                 onChange={(e) => setNewVehicle({ ...newVehicle, currentKm: parseInt(e.target.value) || 0 })}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Limite Revisão Prev. *</label>
+              <input
+                type="number"
+                required
+                value={newVehicle.nextPreventiveMaintenanceKm}
+                onChange={(e) => setNewVehicle({ ...newVehicle, nextPreventiveMaintenanceKm: parseInt(e.target.value) || 0 })}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
               />
             </div>
@@ -2126,7 +3167,7 @@ export function AdminDashboard({
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Km Próxima Troca *</label>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Km Próxima Troca Óleo *</label>
               <input
                 type="number"
                 required
@@ -2168,6 +3209,168 @@ export function AdminDashboard({
         </form>
       </Modal>
 
+      {/* MODAL: CONFIGURAR QUILOMETRAGEM E LIMITE DA REVISÃO PREVENTIVA */}
+      <Modal
+        isOpen={isMileageConfigModalOpen}
+        onClose={() => {
+          setIsMileageConfigModalOpen(false);
+          setSelectedVehicleForMileage(null);
+        }}
+        title={selectedVehicleForMileage ? `Monitoramento de Km: ${selectedVehicleForMileage.plate}` : 'Configurar Monitoramento'}
+        subtitle="Configure o odômetro atual e o limite de quilometragem para a próxima revisão preventiva"
+        maxWidth="md"
+      >
+        <form onSubmit={handleSaveMileageConfig} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Odômetro Atual do Veículo (km) *
+            </label>
+            <input
+              type="number"
+              required
+              min={0}
+              value={mileageConfigForm.currentKm}
+              onChange={(e) => setMileageConfigForm({ ...mileageConfigForm, currentKm: parseInt(e.target.value) || 0 })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Limite Configurado para Próxima Revisão Preventiva (km) *
+            </label>
+            <input
+              type="number"
+              required
+              min={0}
+              value={mileageConfigForm.nextPreventiveMaintenanceKm}
+              onChange={(e) => setMileageConfigForm({ ...mileageConfigForm, nextPreventiveMaintenanceKm: parseInt(e.target.value) || 0 })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+            />
+            {mileageConfigForm.currentKm > mileageConfigForm.nextPreventiveMaintenanceKm && (
+              <p className="text-[11px] text-rose-400 font-semibold mt-1 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>
+                  Atenção: Este veículo ficará sinalizado como LIMITE ULTRAPASSADO (+{(mileageConfigForm.currentKm - mileageConfigForm.nextPreventiveMaintenanceKm).toLocaleString('pt-BR')} km).
+                </span>
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Limite Próxima Troca de Óleo (km)
+            </label>
+            <input
+              type="number"
+              required
+              min={0}
+              value={mileageConfigForm.nextOilChangeKm}
+              onChange={(e) => setMileageConfigForm({ ...mileageConfigForm, nextOilChangeKm: parseInt(e.target.value) || 0 })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+            />
+          </div>
+
+          <div className="pt-4 border-t border-slate-800 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setIsMileageConfigModalOpen(false);
+                setSelectedVehicleForMileage(null);
+              }}
+              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs"
+            >
+              Salvar Monitoramento
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* MODAL: REGISTRAR REVISÃO PREVENTIVA CONCLUÍDA */}
+      <Modal
+        isOpen={isPreventiveModalOpen}
+        onClose={() => {
+          setIsPreventiveModalOpen(false);
+          setSelectedVehicleForPreventive(null);
+        }}
+        title={selectedVehicleForPreventive ? `Registrar Revisão Preventiva: ${selectedVehicleForPreventive.plate}` : ''}
+        subtitle="Zera o alerta de limite ultrapassado e programa o próximo ciclo preventivo"
+        maxWidth="md"
+      >
+        <form onSubmit={handlePerformPreventiveMaintenance} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Quilometragem no Momento da Revisão (km) *
+            </label>
+            <input
+              type="number"
+              required
+              min={0}
+              value={preventiveForm.currentKm}
+              onChange={(e) => setPreventiveForm({ ...preventiveForm, currentKm: parseInt(e.target.value) || 0 })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Intervalo para a Próxima Revisão Preventiva (km) *
+            </label>
+            <input
+              type="number"
+              required
+              min={1000}
+              value={preventiveForm.intervalKm}
+              onChange={(e) => setPreventiveForm({ ...preventiveForm, intervalKm: parseInt(e.target.value) || 20000 })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+            />
+            <span className="text-[11px] text-emerald-400 font-mono block mt-1">
+              Novo limite preventivo será: {(preventiveForm.currentKm + preventiveForm.intervalKm).toLocaleString('pt-BR')} km
+            </span>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Custo da Revisão / Manutenção (R$)
+            </label>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={preventiveForm.cost}
+              onChange={(e) => setPreventiveForm({ ...preventiveForm, cost: parseFloat(e.target.value) || 0 })}
+              placeholder="0,00"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+            />
+          </div>
+
+          <div className="pt-4 border-t border-slate-800 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setIsPreventiveModalOpen(false);
+                setSelectedVehicleForPreventive(null);
+              }}
+              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs"
+            >
+              Confirmar Revisão Preventiva
+            </button>
+          </div>
+        </form>
+      </Modal>
+
       {/* MODAL: REGISTRAR TROCA DE ÓLEO (Section 4) */}
       <Modal
         isOpen={isOilChangeModalOpen}
@@ -2204,6 +3407,21 @@ export function AdminDashboard({
             <span className="text-[11px] text-slate-500">
               Próxima troca prevista para: {(oilChangeForm.currentKm + oilChangeForm.intervalKm).toLocaleString('pt-BR')} km
             </span>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Custo da Troca de Óleo / Filtros (R$)
+            </label>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={oilChangeForm.cost}
+              onChange={(e) => setOilChangeForm({ ...oilChangeForm, cost: parseFloat(e.target.value) || 0 })}
+              placeholder="0,00"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+            />
           </div>
 
           <div className="flex items-center gap-2">
@@ -2394,6 +3612,7 @@ export function AdminDashboard({
           <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3">
             {[
               { id: 'reports', label: `Relatórios (${dailyReports.length})`, icon: FileText },
+              { id: 'checklists', label: `Checklists (${checklists.length})`, icon: ClipboardCheck },
               { id: 'drivers', label: `Motoristas (${drivers.length})`, icon: Users },
               { id: 'vehicles', label: `Veículos (${vehicles.length})`, icon: Truck },
               { id: 'rates', label: `Diárias (${dailyRates.length})`, icon: Receipt },
@@ -2466,6 +3685,38 @@ export function AdminDashboard({
                           id: r.id,
                           title: `Excluir Relatório Diário`,
                           description: `Tem certeza que deseja excluir o relatório de ${r.driverName} da data ${r.date} (Placa: ${r.vehiclePlate})?`,
+                        })}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* CHECKLISTS */}
+            {deleteEntityTab === 'checklists' && (
+              <div className="space-y-2">
+                {checklists.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Nenhum checklist de inspeção cadastrado.</p>
+                ) : (
+                  checklists.map((c) => (
+                    <div key={c.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                      <div>
+                        <strong className="text-slate-200 block">{c.vehiclePlate} · {c.driverName}</strong>
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          Data: {c.date} · Anomalias: {c.anomaliesCount} · Status: {c.resolutionStatus}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => setDeleteTarget({
+                          type: 'checklist',
+                          id: c.id,
+                          title: `Excluir Checklist (${c.vehiclePlate})`,
+                          description: `Tem certeza que deseja excluir o checklist de ${c.driverName} da data ${c.date}?`,
                         })}
                         className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                       >
@@ -2698,6 +3949,203 @@ export function AdminDashboard({
             </button>
           </div>
         </div>
+      </Modal>
+
+      {/* MODAL: DESPACHAR NOVA SOLICITAÇÃO DE VIAGEM */}
+      <Modal
+        isOpen={isTripDispatchModalOpen}
+        onClose={() => setIsTripDispatchModalOpen(false)}
+        title="Despachar Solicitação de Viagem"
+        subtitle="Envia a viagem pendente e dispara alerta sonoro em tempo real no painel do motorista"
+        maxWidth="lg"
+      >
+        <form onSubmit={handleDispatchTrip} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Motorista Destinatário *
+              </label>
+              <select
+                required
+                value={tripDispatchForm.driverId}
+                onChange={(e) => {
+                  const selectedDrv = drivers.find((d) => d.id === e.target.value);
+                  setTripDispatchForm((prev) => ({
+                    ...prev,
+                    driverId: e.target.value,
+                    vehicleId: selectedDrv?.vehicleId || prev.vehicleId,
+                  }));
+                }}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100"
+              >
+                {drivers.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Veículo / Placa *
+              </label>
+              <select
+                required
+                value={tripDispatchForm.vehicleId}
+                onChange={(e) =>
+                  setTripDispatchForm((prev) => ({ ...prev, vehicleId: e.target.value }))
+                }
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100"
+              >
+                {vehicles.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.plate} — {v.model}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Origem *
+              </label>
+              <input
+                type="text"
+                required
+                value={tripDispatchForm.origin}
+                onChange={(e) =>
+                  setTripDispatchForm((prev) => ({ ...prev, origin: e.target.value }))
+                }
+                placeholder="Ex: Campinas, SP"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Destino *
+              </label>
+              <input
+                type="text"
+                required
+                value={tripDispatchForm.destination}
+                onChange={(e) =>
+                  setTripDispatchForm((prev) => ({ ...prev, destination: e.target.value }))
+                }
+                placeholder="Ex: Sorocaba, SP"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Descrição da Carga *
+            </label>
+            <input
+              type="text"
+              required
+              value={tripDispatchForm.cargoDescription}
+              onChange={(e) =>
+                setTripDispatchForm((prev) => ({ ...prev, cargoDescription: e.target.value }))
+              }
+              placeholder="Ex: 4 churrasqueiras pré-moldadas + 12 dutos"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Data Programada *
+              </label>
+              <input
+                type="date"
+                required
+                value={tripDispatchForm.scheduledDate}
+                onChange={(e) =>
+                  setTripDispatchForm((prev) => ({ ...prev, scheduledDate: e.target.value }))
+                }
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Frete Estimado (R$) *
+              </label>
+              <input
+                type="number"
+                required
+                min={0}
+                step="0.01"
+                value={tripDispatchForm.estimatedFreight}
+                onChange={(e) =>
+                  setTripDispatchForm((prev) => ({
+                    ...prev,
+                    estimatedFreight: parseFloat(e.target.value) || 0,
+                  }))
+                }
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Prioridade
+              </label>
+              <select
+                value={tripDispatchForm.priority}
+                onChange={(e) =>
+                  setTripDispatchForm((prev) => ({
+                    ...prev,
+                    priority: e.target.value as 'normal' | 'urgent',
+                  }))
+                }
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100"
+              >
+                <option value="normal">Normal</option>
+                <option value="urgent">Urgente (Alerta Crítico)</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Observações para o Motorista
+            </label>
+            <textarea
+              rows={2}
+              value={tripDispatchForm.notes}
+              onChange={(e) =>
+                setTripDispatchForm((prev) => ({ ...prev, notes: e.target.value }))
+              }
+              placeholder="Instruções de horário, cliente ou descarga..."
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100"
+            />
+          </div>
+
+          <div className="pt-4 border-t border-slate-800 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setIsTripDispatchModalOpen(false)}
+              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={isDispatchingTrip}
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>{isDispatchingTrip ? 'Enviando...' : 'Enviar Solicitação'}</span>
+            </button>
+          </div>
+        </form>
       </Modal>
 
       {/* MODAL: RELATÓRIO OPERACIONAL DE VIAGENS E CUSTOS (PDF IMPRIMÍVEL) */}

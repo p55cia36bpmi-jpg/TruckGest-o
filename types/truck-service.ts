@@ -36,6 +36,10 @@ export interface Vehicle {
   lastOilChangeDate: string;
   lastOilChangeKm: number;
   nextOilChangeKm: number;
+  lastPreventiveMaintenanceDate?: string;
+  lastPreventiveMaintenanceKm?: number;
+  nextPreventiveMaintenanceKm?: number;
+  preventiveIntervalKm?: number;
   filtersReplaced: boolean;
   alertDismissed?: boolean;
   createdAt: string;
@@ -127,3 +131,80 @@ export interface SystemNotification {
   read: boolean;
   createdAt: string;
 }
+
+export type ChecklistItemStatus = 'ok' | 'anomaly';
+export type AnomalySeverity = 'low' | 'medium' | 'critical';
+export type ChecklistCategory =
+  | 'Pneus & Rodagem'
+  | 'Freios & Pneumático'
+  | 'Iluminação & Sinalização'
+  | 'Motor & Fluidos'
+  | 'Cabine & Segurança'
+  | 'Carroceria & Carga';
+
+export interface ChecklistItem {
+  id: string;
+  category: ChecklistCategory;
+  label: string;
+  status: ChecklistItemStatus;
+  severity?: AnomalySeverity;
+  notes?: string;
+}
+
+export type ChecklistOverallStatus = 'approved' | 'attention' | 'critical';
+export type ChecklistResolutionStatus = 'ok' | 'pending_review' | 'in_maintenance' | 'resolved';
+
+export interface VehicleChecklist {
+  id: string;
+  driverId: string;
+  driverName: string;
+  vehicleId: string;
+  vehiclePlate: string;
+  vehicleModel?: string;
+  date: string; // YYYY-MM-DD
+  inspectionType: 'pre_trip' | 'post_trip' | 'routine';
+  odometerKm: number;
+  items: ChecklistItem[];
+  anomaliesCount: number;
+  criticalAnomaliesCount: number;
+  overallStatus: ChecklistOverallStatus;
+  resolutionStatus: ChecklistResolutionStatus;
+  generalNotes?: string;
+  adminNotes?: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  createdAt: string;
+}
+
+export interface MaintenanceRecord {
+  id: string;
+  vehicleId: string;
+  date: string; // YYYY-MM-DD
+  odometer: number;
+  type: string;
+  cost?: number;
+  filtersReplaced?: boolean;
+  createdAt: string;
+}
+
+export type TripRequestStatus = 'pending' | 'accepted' | 'in_progress' | 'completed' | 'rejected';
+
+export interface TripRequest {
+  id: string;
+  driverId: string;
+  driverName: string;
+  vehicleId: string;
+  vehiclePlate: string;
+  origin: string;
+  destination: string;
+  cargoDescription: string;
+  estimatedFreight: number;
+  scheduledDate: string; // YYYY-MM-DD
+  priority: 'normal' | 'urgent';
+  notes?: string;
+  status: TripRequestStatus;
+  createdByAdminEmail: string;
+  createdAt: string;
+  respondedAt?: string;
+}
+

@@ -1,12 +1,12 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { 
-  onAuthStateChanged, 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  signOut as firebaseSignOut, 
-  User 
+import {
+  onAuthStateChanged,
+  signInWithPopup,
+  GoogleAuthProvider,
+  signOut as firebaseSignOut,
+  User,
 } from 'firebase/auth';
 import { auth } from '@/lib/firebase';
 import { getUserProfile, saveUserProfile, getDrivers } from '@/services/firestoreService';
@@ -27,7 +27,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   user: null,
   profile: null,
-  role: 'admin',
+  role: 'driver',
   currentDriver: null,
   loading: true,
   signInWithGoogle: async () => {},
@@ -39,19 +39,19 @@ const AuthContext = createContext<AuthContextType>({
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [role, setRole] = useState<UserRole>('admin');
+  const [role, setRole] = useState<UserRole>('driver');
   const [currentDriver, setCurrentDriver] = useState<Driver | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Load profile helper
-  const syncDriverInfo = async (driverId?: string) => {
+  const syncDriverInfo = async (driverId?: string): Promise<Driver | null> => {
     if (!driverId) {
       setCurrentDriver(null);
-      return;
+      return null;
     }
     const drivers = await getDrivers();
-    const d = drivers.find((item) => item.id === driverId) || drivers[0] || null;
+    const d = drivers.find((item) => item.id === driverId) || null;
     setCurrentDriver(d);
+    return d;
   };
 
   useEffect(() => {
@@ -60,52 +60,89 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (firebaseUser) {
         let p = await getUserProfile(firebaseUser.uid);
         if (!p) {
-          const isBootstrappedAdmin = firebaseUser.email === 'p55cia36bpmi@gmail.com';
-          p = {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email || '',
-            name: firebaseUser.displayName || 'Gestor de Frota',
-            role: isBootstrappedAdmin ? 'admin' : 'admin',
-            createdAt: new Date().toISOString(),
-          };
+          const emailLower = (firebaseUser.email || '').toLowerCase();
+          const drivers = await getDrivers();
+          const matchedDriver = drivers.find(
+            (d) => d.loginEmail && d.loginEmail.toLowerCase() === emailLower
+          );
+
+          if (matchedDriver) {
+            p = {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email || matchedDriver.loginEmail || '',
+              name: matchedDriver.name,
+              role: 'driver',
+              driverId: matchedDriver.id,
+              createdAt: new Date().toISOString(),
+            };
+          } else {
+            const isBootstrappedAdmin = emailLower === 'p55cia36bpmi@gmail.com';
+            p = {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email || '',
+              name: firebaseUser.displayName || 'Gestor de Frota',
+              role: isBootstrappedAdmin ? 'admin' : 'admin',
+              createdAt: new Date().toISOString(),
+            };
+          }
           await saveUserProfile(p);
         }
+
+        if (p.role === 'driver') {
+          const drv = await syncDriverInfo(p.driverId);
+          if (!drv || drv.active === false) {
+            setProfile(null);
+            setRole('driver');
+            setCurrentDriver(null);
+            setLoading(false);
+            return;
+          }
+        } else {
+          setCurrentDriver(null);
+        }
+
         setProfile(p);
         setRole(p.role);
-        await syncDriverInfo(p.driverId);
       } else {
-        // Check saved session in localStorage
+        // Restore explicitly authenticated session from localStorage (never auto-login as admin)
         try {
-          const savedSession = typeof window !== 'undefined' ? localStorage.getItem('truckgestao_active_user') : null;
+          const savedSession =
+            typeof window !== 'undefined' ? localStorage.getItem('truckgestao_active_user') : null;
           if (savedSession) {
             const parsed = JSON.parse(savedSession);
             if (parsed.profile) {
-              setProfile(parsed.profile);
-              setRole(parsed.profile.role);
-              if (parsed.driver) {
-                setCurrentDriver(parsed.driver);
-              } else if (parsed.profile.driverId) {
-                await syncDriverInfo(parsed.profile.driverId);
+              const restoredProfile = parsed.profile as UserProfile;
+              if (restoredProfile.role === 'driver') {
+                const freshDriver = await syncDriverInfo(restoredProfile.driverId);
+                if (!freshDriver || freshDriver.active === false) {
+                  localStorage.removeItem('truckgestao_active_user');
+                  setProfile(null);
+                  setRole('driver');
+                  setCurrentDriver(null);
+                  setLoading(false);
+                  return;
+                }
+                setProfile(restoredProfile);
+                setRole('driver');
+                setLoading(false);
+                return;
+              } else if (restoredProfile.role === 'admin') {
+                setProfile(restoredProfile);
+                setRole('admin');
+                setCurrentDriver(null);
+                setLoading(false);
+                return;
               }
-              setLoading(false);
-              return;
             }
           }
         } catch (e) {
           console.warn('Erro ao restaurar sessão:', e);
         }
 
-        // Fallback default admin profile
-        const defaultAdminProfile: UserProfile = {
-          uid: 'admin-master',
-          email: 'admin@truckgestao.com',
-          name: 'Gestor de Frota (Administrador)',
-          role: 'admin',
-          password: 'admin123',
-          createdAt: new Date().toISOString(),
-        };
-        setProfile(defaultAdminProfile);
-        setRole('admin');
+        // No active session: keep unauthenticated so login screen is presented
+        setProfile(null);
+        setRole('driver');
+        setCurrentDriver(null);
       }
       setLoading(false);
     });
@@ -113,7 +150,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => unsubscribe();
   }, []);
 
-  const signInWithCredentials = async (identifier: string, password: string): Promise<{ success: boolean; error?: string }> => {
+  const signInWithCredentials = async (
+    identifier: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string }> => {
     const { isSupabaseConfigured } = await import('@/lib/supabase');
     if (isSupabaseConfigured()) {
       const { authenticateUserSupabase } = await import('@/services/supabaseService');
@@ -129,6 +169,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           );
         }
         return { success: true };
+      }
+      if (supaResult.error && supaResult.error.includes('bloqueado')) {
+        return { success: false, error: supaResult.error };
       }
     }
 
@@ -164,64 +207,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.removeItem('truckgestao_active_user');
       }
       await firebaseSignOut(auth);
-      // Reset to unauthenticated/default state
-      const defaultAdminProfile: UserProfile = {
-        uid: 'admin-master',
-        email: 'admin@truckgestao.com',
-        name: 'Gestor de Frota (Administrador)',
-        role: 'admin',
-        password: 'admin123',
-        createdAt: new Date().toISOString(),
-      };
-      setProfile(defaultAdminProfile);
-      setRole('admin');
-      setCurrentDriver(null);
     } catch (err) {
       console.error('Erro no logout:', err);
+    } finally {
+      setUser(null);
+      setProfile(null);
+      setRole('driver');
+      setCurrentDriver(null);
     }
   };
 
+  // Only an authenticated Administrator can toggle preview mode between Admin Dashboard and Driver Portal.
+  // Drivers are strictly locked to 'driver' role and their own driverId.
   const switchDemoRole = async (targetRole: UserRole, targetDriverId?: string) => {
+    if (profile?.role !== 'admin') {
+      return;
+    }
+
     if (targetRole === 'admin') {
-      if (profile?.role !== 'admin') {
-        return;
-      }
       setRole('admin');
-      const adminProfile: UserProfile = {
-        uid: profile?.uid || 'admin-master',
-        email: profile?.email || 'admin@truckgestao.com',
-        name: profile?.name || 'Gestor de Frota (Administrador)',
-        role: 'admin',
-        password: profile?.password || 'admin123',
-        createdAt: profile?.createdAt || new Date().toISOString(),
-      };
-      setProfile(adminProfile);
       setCurrentDriver(null);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('truckgestao_active_user', JSON.stringify({ profile: adminProfile }));
-      }
     } else {
-      setRole('driver');
       const drivers = await getDrivers();
-      const driver = targetDriverId 
-        ? drivers.find((d) => d.id === targetDriverId) 
+      const driver = targetDriverId
+        ? drivers.find((d) => d.id === targetDriverId)
         : drivers[0];
 
       if (driver) {
+        setRole('driver');
         setCurrentDriver(driver);
-        const driverProfile: UserProfile = {
-          uid: `user-${driver.id}`,
-          email: driver.loginEmail || `${driver.id}@truckgestao.com`,
-          name: driver.name,
-          role: 'driver',
-          driverId: driver.id,
-          password: driver.password || '123456',
-          createdAt: new Date().toISOString(),
-        };
-        setProfile(driverProfile);
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('truckgestao_active_user', JSON.stringify({ profile: driverProfile, driver }));
-        }
       }
     }
   };

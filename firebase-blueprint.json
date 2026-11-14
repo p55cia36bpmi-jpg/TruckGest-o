@@ -47,6 +47,10 @@
         "lastOilChangeDate": { "type": "string", "maxLength": 30 },
         "lastOilChangeKm": { "type": "number" },
         "nextOilChangeKm": { "type": "number" },
+        "lastPreventiveMaintenanceDate": { "type": "string", "maxLength": 30 },
+        "lastPreventiveMaintenanceKm": { "type": "number" },
+        "nextPreventiveMaintenanceKm": { "type": "number" },
+        "preventiveIntervalKm": { "type": "number" },
         "filtersReplaced": { "type": "boolean" },
         "alertDismissed": { "type": "boolean" },
         "createdAt": { "type": "string", "maxLength": 50 }
@@ -207,6 +211,53 @@
         "createdAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "targetRole", "title", "message", "type", "read"]
+    },
+    "VehicleChecklist": {
+      "title": "VehicleChecklist",
+      "description": "Checklist de inspeção veicular e verificação de anomalias preenchido pelo motorista",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "vehiclePlate": { "type": "string", "maxLength": 10 },
+        "date": { "type": "string", "maxLength": 20 },
+        "inspectionType": { "type": "string", "enum": ["pre_trip", "post_trip", "routine"] },
+        "odometerKm": { "type": "number" },
+        "anomaliesCount": { "type": "number" },
+        "criticalAnomaliesCount": { "type": "number" },
+        "overallStatus": { "type": "string", "enum": ["approved", "attention", "critical"] },
+        "resolutionStatus": { "type": "string", "enum": ["ok", "pending_review", "in_maintenance", "resolved"] },
+        "generalNotes": { "type": "string", "maxLength": 1000 },
+        "adminNotes": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "driverId", "vehicleId", "date", "inspectionType", "odometerKm", "overallStatus", "resolutionStatus"]
+    },
+    "TripRequest": {
+      "title": "TripRequest",
+      "description": "Solicitação de viagem pendente enviada pelo administrador para o motorista",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "vehiclePlate": { "type": "string", "maxLength": 10 },
+        "origin": { "type": "string", "maxLength": 120 },
+        "destination": { "type": "string", "maxLength": 120 },
+        "cargoDescription": { "type": "string", "maxLength": 200 },
+        "estimatedFreight": { "type": "number" },
+        "scheduledDate": { "type": "string", "maxLength": 20 },
+        "priority": { "type": "string", "enum": ["normal", "urgent"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["pending", "accepted", "in_progress", "completed", "rejected"] },
+        "createdByAdminEmail": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "respondedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "driverId", "vehicleId", "origin", "destination", "cargoDescription", "scheduledDate", "priority", "status"]
     }
   },
   "firestore": {
@@ -257,6 +308,14 @@
     "/notifications/{notificationId}": {
       "schema": { "$ref": "#/entities/Notification" },
       "description": "Notificações e avisos de manutenção, CNH e pagamentos"
+    },
+    "/vehicleChecklists/{checklistId}": {
+      "schema": { "$ref": "#/entities/VehicleChecklist" },
+      "description": "Checklists de inspeção diária e anomalias reportadas nos veículos"
+    },
+    "/tripRequests/{tripId}": {
+      "schema": { "$ref": "#/entities/TripRequest" },
+      "description": "Solicitações de viagens despachadas pelo administrador aos motoristas"
     }
   }
 }
