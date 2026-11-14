@@ -640,20 +640,23 @@ export async function authenticateUser(identifier: string, password: string): Pr
 // --- INITIAL SEEDING HELPER ---
 export async function seedInitialDataIfEmpty(): Promise<void> {
   try {
+    // Check if the system was already initialized
+    const adminSnap = await getDoc(doc(db, 'users', 'admin-master'));
+    if (adminSnap.exists()) {
+      return; // System already initialized. Do not re-seed or override user deletions!
+    }
+
     const vehiclesSnap = await getDocs(collection(db, 'vehicles'));
     if (!vehiclesSnap.empty) {
-      // Ensure admin and drivers have users collection accounts
-      const adminSnap = await getDoc(doc(db, 'users', 'admin-master'));
-      if (!adminSnap.exists()) {
-        await setDoc(doc(db, 'users', 'admin-master'), {
-          uid: 'admin-master',
-          email: 'admin@truckgestao.com',
-          name: 'Gestor de Frota (Administrador)',
-          role: 'admin',
-          password: 'admin123',
-          createdAt: new Date().toISOString(),
-        });
-      }
+      // Ensure admin account is present
+      await setDoc(doc(db, 'users', 'admin-master'), {
+        uid: 'admin-master',
+        email: 'admin@truckgestao.com',
+        name: 'Gestor de Frota (Administrador)',
+        role: 'admin',
+        password: 'admin123',
+        createdAt: new Date().toISOString(),
+      });
       return;
     }
 

@@ -31,6 +31,7 @@ import {
 } from '@/services/firestoreService';
 import { MercosulPlate } from './MercosulPlate';
 import { Modal } from './Modal';
+import { PrintReportsModal } from './PrintReportsModal';
 import { 
   LayoutDashboard, 
   Truck, 
@@ -164,6 +165,21 @@ export function AdminDashboard({
   const [selectedVehicleForOil, setSelectedVehicleForOil] = useState<Vehicle | null>(null);
   const [isDeleteManagerOpen, setIsDeleteManagerOpen] = useState(false);
   const [deleteEntityTab, setDeleteEntityTab] = useState<'reports' | 'drivers' | 'vehicles' | 'rates' | 'tolls' | 'payments'>('reports');
+
+  // Dedicated Confirmation Modal for Deletions (avoids blocked window.confirm in iframes)
+  interface DeleteTarget {
+    type: 'vehicle' | 'driver' | 'dailyReport' | 'dailyRate' | 'toll' | 'payment';
+    id: string;
+    title: string;
+    description: string;
+  }
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteFeedback, setDeleteFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Printable PDF Modal for Daily Trip & Cost Reports
+  const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [reportForPrint, setReportForPrint] = useState<DailyReport | null>(null);
 
   // Forms
   const [newDriver, setNewDriver] = useState({
@@ -442,6 +458,48 @@ export function AdminDashboard({
     onRefreshData();
   };
 
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    setDeleteFeedback(null);
+    try {
+      switch (deleteTarget.type) {
+        case 'vehicle':
+          await deleteVehicle(deleteTarget.id);
+          break;
+        case 'driver':
+          await deleteDriver(deleteTarget.id);
+          break;
+        case 'dailyReport':
+          await deleteDailyReport(deleteTarget.id);
+          break;
+        case 'dailyRate':
+          await deleteDailyRate(deleteTarget.id);
+          break;
+        case 'toll':
+          await deleteToll(deleteTarget.id);
+          break;
+        case 'payment':
+          await deletePayment(deleteTarget.id);
+          break;
+      }
+      await onRefreshData();
+      setDeleteFeedback({
+        message: `${deleteTarget.title} concluída com sucesso!`,
+        type: 'success',
+      });
+      setDeleteTarget(null);
+    } catch (err: any) {
+      console.error('Erro ao excluir registro:', err);
+      setDeleteFeedback({
+        message: `Erro ao excluir: ${err?.message || 'Falha na comunicação com o banco de dados.'}`,
+        type: 'error',
+      });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   // Export CSV
   const handleExportCSV = () => {
     const headers = ['Data', 'Motorista', 'Placa', 'Km_Inicial', 'Km_Final', 'Km_Percorrido', 'Litros', 'Custo_Combustivel', 'Ajudante', 'Qtd_Entregas', 'Valor_Fretes_R$', 'Status'];
@@ -596,6 +654,18 @@ export function AdminDashboard({
             >
               <Trash2 className="w-3.5 h-3.5 text-rose-400" />
               <span>Gerenciar & Excluir Dados</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setReportForPrint(null);
+                setIsPrintModalOpen(true);
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 rounded border border-amber-500/30 text-xs font-semibold transition-colors shadow-sm"
+              title="Exportar relatórios diários de viagens e custos para formato PDF imprimível"
+            >
+              <Printer className="w-3.5 h-3.5 text-amber-400" />
+              <span>Imprimir / PDF ({filteredReports.length})</span>
             </button>
 
             <button
@@ -893,7 +963,7 @@ export function AdminDashboard({
       {/* TAB 2: RELATÓRIOS DIÁRIOS RECEBIDOS (AUDITORIA E ENTREGAS) */}
       {activeTab === 'reports' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between bg-slate-900 border border-slate-800 p-4 rounded-xl">
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-xl">
             <div>
               <h4 className="text-sm font-bold text-slate-100">
                 Auditoria de Relatórios Diários de Trabalho
@@ -902,9 +972,22 @@ export function AdminDashboard({
                 Acompanhe o trajeto, entregas em cada cidade e aprove os relatórios enviados
               </p>
             </div>
-            <span className="text-xs text-slate-400 font-mono">
-              {filteredReports.length} relatórios listados
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-400 font-mono">
+                {filteredReports.length} relatórios listados
+              </span>
+              <button
+                onClick={() => {
+                  setReportForPrint(null);
+                  setIsPrintModalOpen(true);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 rounded-lg border border-amber-500/30 text-xs font-semibold transition-colors shadow-sm"
+                title="Exportar todos os relatórios filtrados em formato PDF imprimível"
+              >
+                <Printer className="w-4 h-4 text-amber-400" />
+                <span>Exportar Relatório PDF</span>
+              </button>
+            </div>
           </div>
 
           <div className="space-y-4">
@@ -976,14 +1059,26 @@ export function AdminDashboard({
                       </button>
                     )}
 
+                    {/* Imprimir Ficha de Viagem Individual em PDF */}
                     <button
-                      onClick={async () => {
-                        if (confirm(`Excluir relatório do dia ${report.date}?`)) {
-                          await deleteDailyReport(report.id);
-                          onRefreshData();
-                        }
+                      onClick={() => {
+                        setReportForPrint(report);
+                        setIsPrintModalOpen(true);
                       }}
-                      className="p-1.5 text-slate-500 hover:text-rose-400 transition-colors"
+                      className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded transition-colors"
+                      title="Exportar Ficha de Viagem e Custos em PDF / Imprimir"
+                    >
+                      <Printer className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      onClick={() => setDeleteTarget({
+                        type: 'dailyReport',
+                        id: report.id,
+                        title: `Excluir Relatório Diário`,
+                        description: `Tem certeza que deseja excluir o relatório de ${report.driverName} do dia ${report.date} (Veículo: ${report.vehiclePlate})? Esta operação é irreversível.`,
+                      })}
+                      className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
                       title="Excluir relatório diário"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -1133,13 +1228,13 @@ export function AdminDashboard({
 
                   <div className="pt-2 border-t border-slate-800 flex justify-between items-center">
                     <button
-                      onClick={async () => {
-                        if (confirm(`Tem certeza que deseja excluir o veículo ${v.plate} (${v.model})?`)) {
-                          await deleteVehicle(v.id);
-                          onRefreshData();
-                        }
-                      }}
-                      className="p-1.5 text-slate-500 hover:text-rose-400 transition-colors"
+                      onClick={() => setDeleteTarget({
+                        type: 'vehicle',
+                        id: v.id,
+                        title: `Excluir Veículo ${v.plate}`,
+                        description: `Tem certeza que deseja excluir o veículo ${v.plate} (${v.model})? O veículo será removido permanentemente do banco de dados.`,
+                      })}
+                      className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
                       title="Excluir veículo"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -1329,11 +1424,13 @@ export function AdminDashboard({
                       <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
                         <span className="text-slate-500 truncate max-w-[200px]">{d.address}</span>
                         <button
-                          onClick={async () => {
-                            await deleteDriver(d.id);
-                            onRefreshData();
-                          }}
-                          className="p-1.5 text-slate-500 hover:text-rose-400 transition-colors"
+                          onClick={() => setDeleteTarget({
+                            type: 'driver',
+                            id: d.id,
+                            title: `Excluir Motorista ${d.name}`,
+                            description: `Tem certeza que deseja excluir o motorista ${d.name} (CPF: ${d.cpf}) e revogar suas credenciais de acesso?`,
+                          })}
+                          className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
                           title="Excluir motorista"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -1411,13 +1508,13 @@ export function AdminDashboard({
                     </div>
                     {dailyRates.length > 1 && (
                       <button
-                        onClick={async () => {
-                          if (confirm('Tem certeza que deseja excluir esta vigência de diária?')) {
-                            await deleteDailyRate(rate.id);
-                            onRefreshData();
-                          }
-                        }}
-                        className="p-1 text-slate-500 hover:text-rose-400 transition-colors"
+                        onClick={() => setDeleteTarget({
+                          type: 'dailyRate',
+                          id: rate.id,
+                          title: `Excluir Vigência de Diária`,
+                          description: `Tem certeza que deseja excluir esta vigência iniciada em ${rate.effectiveDate} (Motorista: R$ ${rate.driverDailyRate.toFixed(2)} / Ajudante: R$ ${rate.helperDailyRate.toFixed(2)})?`,
+                        })}
+                        className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
                         title="Excluir vigência"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -1476,11 +1573,14 @@ export function AdminDashboard({
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
-                        onClick={async () => {
-                          await deleteToll(t.id);
-                          onRefreshData();
-                        }}
-                        className="p-1 text-slate-500 hover:text-rose-400 transition-colors"
+                        onClick={() => setDeleteTarget({
+                          type: 'toll',
+                          id: t.id,
+                          title: `Excluir Registro de Pedágio`,
+                          description: `Tem certeza que deseja excluir o pedágio "${t.route}" no valor de R$ ${t.cost.toFixed(2)}?`,
+                        })}
+                        className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
+                        title="Excluir pedágio"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -1692,13 +1792,13 @@ export function AdminDashboard({
                     </td>
                     <td className="py-3 px-4 text-right">
                       <button
-                        onClick={async () => {
-                          if (confirm(`Excluir histórico de pagamento de ${p.driverName}?`)) {
-                            await deletePayment(p.id);
-                            onRefreshData();
-                          }
-                        }}
-                        className="p-1 text-slate-500 hover:text-rose-400 transition-colors"
+                        onClick={() => setDeleteTarget({
+                          type: 'payment',
+                          id: p.id,
+                          title: `Excluir Histórico de Liquidação`,
+                          description: `Tem certeza que deseja excluir o pagamento arquivado de ${p.driverName}?`,
+                        })}
+                        className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors"
                         title="Excluir pagamento arquivado"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -2319,6 +2419,31 @@ export function AdminDashboard({
             })}
           </div>
 
+          {/* Feedback banner if an action was recently performed */}
+          {deleteFeedback && (
+            <div className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+              deleteFeedback.type === 'success'
+                ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
+                : 'bg-rose-950/40 border-rose-500/50 text-rose-300'
+            }`}>
+              <div className="flex items-center gap-2">
+                {deleteFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                )}
+                <span>{deleteFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteFeedback(null)}
+                className="text-slate-400 hover:text-slate-200 text-xs px-2 py-0.5"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           {/* List Area with Direct Deletion */}
           <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
             {/* REPORTS */}
@@ -2336,12 +2461,12 @@ export function AdminDashboard({
                         </span>
                       </div>
                       <button
-                        onClick={async () => {
-                          if (confirm(`Tem certeza que deseja excluir o relatório de ${r.driverName} da data ${r.date}?`)) {
-                            await deleteDailyReport(r.id);
-                            onRefreshData();
-                          }
-                        }}
+                        onClick={() => setDeleteTarget({
+                          type: 'dailyReport',
+                          id: r.id,
+                          title: `Excluir Relatório Diário`,
+                          description: `Tem certeza que deseja excluir o relatório de ${r.driverName} da data ${r.date} (Placa: ${r.vehiclePlate})?`,
+                        })}
                         className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -2368,12 +2493,12 @@ export function AdminDashboard({
                         </span>
                       </div>
                       <button
-                        onClick={async () => {
-                          if (confirm(`Tem certeza que deseja excluir o motorista ${d.name} e suas credenciais de acesso?`)) {
-                            await deleteDriver(d.id);
-                            onRefreshData();
-                          }
-                        }}
+                        onClick={() => setDeleteTarget({
+                          type: 'driver',
+                          id: d.id,
+                          title: `Excluir Motorista ${d.name}`,
+                          description: `Tem certeza que deseja excluir o motorista ${d.name} e suas credenciais de acesso?`,
+                        })}
                         className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -2400,12 +2525,12 @@ export function AdminDashboard({
                         </span>
                       </div>
                       <button
-                        onClick={async () => {
-                          if (confirm(`Tem certeza que deseja excluir o veículo ${v.plate}?`)) {
-                            await deleteVehicle(v.id);
-                            onRefreshData();
-                          }
-                        }}
+                        onClick={() => setDeleteTarget({
+                          type: 'vehicle',
+                          id: v.id,
+                          title: `Excluir Veículo ${v.plate}`,
+                          description: `Tem certeza que deseja excluir o veículo ${v.plate} (${v.model})?`,
+                        })}
                         className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -2432,12 +2557,12 @@ export function AdminDashboard({
                         </span>
                       </div>
                       <button
-                        onClick={async () => {
-                          if (confirm(`Excluir esta vigência de diária (${rt.effectiveDate})?`)) {
-                            await deleteDailyRate(rt.id);
-                            onRefreshData();
-                          }
-                        }}
+                        onClick={() => setDeleteTarget({
+                          type: 'dailyRate',
+                          id: rt.id,
+                          title: `Excluir Vigência de Diária`,
+                          description: `Tem certeza que deseja excluir esta vigência iniciada em ${rt.effectiveDate}?`,
+                        })}
                         className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -2464,12 +2589,12 @@ export function AdminDashboard({
                         </span>
                       </div>
                       <button
-                        onClick={async () => {
-                          if (confirm(`Excluir o pedágio "${t.route}"?`)) {
-                            await deleteToll(t.id);
-                            onRefreshData();
-                          }
-                        }}
+                        onClick={() => setDeleteTarget({
+                          type: 'toll',
+                          id: t.id,
+                          title: `Excluir Pedágio`,
+                          description: `Tem certeza que deseja excluir o pedágio "${t.route}" no valor de R$ ${t.cost.toFixed(2)}?`,
+                        })}
                         className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -2496,12 +2621,12 @@ export function AdminDashboard({
                         </span>
                       </div>
                       <button
-                        onClick={async () => {
-                          if (confirm(`Excluir histórico de liquidação de ${p.driverName}?`)) {
-                            await deletePayment(p.id);
-                            onRefreshData();
-                          }
-                        }}
+                        onClick={() => setDeleteTarget({
+                          type: 'payment',
+                          id: p.id,
+                          title: `Excluir Liquidação`,
+                          description: `Tem certeza que deseja excluir o histórico de liquidação de ${p.driverName}?`,
+                        })}
                         className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -2525,6 +2650,71 @@ export function AdminDashboard({
           </div>
         </div>
       </Modal>
+
+      {/* MODAL: CONFIRMAÇÃO DE EXCLUSÃO (100% funcional em iFrame sem dependência de window.confirm) */}
+      <Modal
+        isOpen={!!deleteTarget}
+        onClose={() => !isDeleting && setDeleteTarget(null)}
+        title={deleteTarget?.title || 'Confirmar Exclusão'}
+        subtitle="Esta ação removerá o registro permanentemente do banco de dados"
+        maxWidth="md"
+      >
+        <div className="space-y-4">
+          <div className="p-4 bg-rose-950/30 border border-rose-500/30 rounded-xl flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-rose-200 space-y-1">
+              <p className="font-semibold text-slate-100">{deleteTarget?.title}</p>
+              <p>{deleteTarget?.description}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+            <button
+              type="button"
+              disabled={isDeleting}
+              onClick={() => setDeleteTarget(null)}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+
+            <button
+              type="button"
+              disabled={isDeleting}
+              onClick={handleConfirmDelete}
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 shadow-lg shadow-rose-950 disabled:opacity-50"
+            >
+              {isDeleting ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>Excluindo...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Sim, Confirmar Exclusão</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* MODAL: RELATÓRIO OPERACIONAL DE VIAGENS E CUSTOS (PDF IMPRIMÍVEL) */}
+      <PrintReportsModal
+        isOpen={isPrintModalOpen}
+        onClose={() => {
+          setIsPrintModalOpen(false);
+          setReportForPrint(null);
+        }}
+        reports={filteredReports}
+        startDate={startDateFilter}
+        endDate={endDateFilter}
+        selectedDriverName={selectedDriverFilter !== 'all' ? drivers.find((d) => d.id === selectedDriverFilter)?.name : undefined}
+        selectedVehiclePlate={selectedVehicleFilter !== 'all' ? vehicles.find((v) => v.id === selectedVehicleFilter)?.plate : undefined}
+        adminEmail={adminProfile?.email}
+        initialReport={reportForPrint}
+      />
     </div>
   );
 }
