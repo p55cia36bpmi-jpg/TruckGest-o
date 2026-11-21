@@ -8,11 +8,14 @@ import {
   AlertOctagon,
   Bell,
   BellRing,
+  BellOff,
   Volume2,
   VolumeX,
   X,
   Check,
   ArrowRight,
+  Wrench,
+  Smartphone,
 } from 'lucide-react';
 import { NotificationSoundVariant } from '@/lib/notificationSound';
 
@@ -30,6 +33,13 @@ export interface DriverToastItem {
   createdAt: string;
 }
 
+export type DriverPushStatus =
+  | 'inactive'
+  | 'fcm'
+  | 'web_push_fallback'
+  | 'blocked'
+  | 'unsupported';
+
 interface DriverAlertControlBarProps {
   soundMuted: boolean;
   audioBlocked: boolean;
@@ -38,6 +48,15 @@ interface DriverAlertControlBarProps {
   onUnlockAudio: () => void;
   onTestSoundToast: () => void;
   onReplayPendingAlerts: () => void;
+  pushStatus?: DriverPushStatus;
+  pushEnabled?: boolean;
+  pushLoading?: boolean;
+  notifyTrips?: boolean;
+  notifyMaintenance?: boolean;
+  pushFeedback?: string | null;
+  onTogglePush?: () => void;
+  onToggleNotifyTrips?: () => void;
+  onToggleNotifyMaintenance?: () => void;
 }
 
 export function DriverAlertControlBar({
@@ -48,87 +67,182 @@ export function DriverAlertControlBar({
   onUnlockAudio,
   onTestSoundToast,
   onReplayPendingAlerts,
+  pushStatus = 'inactive',
+  pushEnabled = false,
+  pushLoading = false,
+  notifyTrips = true,
+  notifyMaintenance = true,
+  pushFeedback,
+  onTogglePush,
+  onToggleNotifyTrips,
+  onToggleNotifyMaintenance,
 }: DriverAlertControlBarProps) {
+  const isPushActive =
+    pushEnabled && (pushStatus === 'fcm' || pushStatus === 'web_push_fallback');
+
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-      <div className="flex items-center gap-3">
-        <div
-          className={`w-9 h-9 rounded-xl flex items-center justify-center border shrink-0 ${
-            activeAlertsCount > 0
-              ? 'bg-amber-500/15 border-amber-500/40 text-amber-400'
-              : 'bg-slate-950 border-slate-800 text-slate-400'
-          }`}
-        >
-          <Bell className="w-4 h-4" />
-        </div>
-        <div className="text-xs">
-          <strong className="text-slate-100 block">
-            Central de Alertas Sonoros do Motorista
-          </strong>
-          <span className="text-slate-400">
-            {activeAlertsCount > 0
-              ? `${activeAlertsCount} alerta${activeAlertsCount > 1 ? 's' : ''} pendente${activeAlertsCount > 1 ? 's' : ''} de atenção`
-              : 'Monitoramento em tempo real de checklists e viagens ativo'}
-          </span>
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        {audioBlocked && !soundMuted && (
-          <button
-            type="button"
-            onClick={onUnlockAudio}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition-colors whitespace-nowrap shrink-0"
+    <div className="bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 space-y-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div
+            className={`w-9 h-9 rounded-xl flex items-center justify-center border shrink-0 ${
+              activeAlertsCount > 0
+                ? 'bg-amber-500/15 border-amber-500/40 text-amber-400'
+                : 'bg-slate-950 border-slate-800 text-slate-400'
+            }`}
           >
-            <Volume2 className="w-3.5 h-3.5" />
-            <span>Ativar Áudio Agora</span>
-          </button>
-        )}
+            <Bell className="w-4 h-4" />
+          </div>
+          <div className="text-xs">
+            <strong className="text-slate-100 block">
+              Central de Alertas e Push do Motorista
+            </strong>
+            <span className="text-slate-400">
+              {activeAlertsCount > 0
+                ? `${activeAlertsCount} alerta${activeAlertsCount > 1 ? 's' : ''} pendente${activeAlertsCount > 1 ? 's' : ''} de atenção`
+                : 'Monitoramento em tempo real de viagens e manutenções ativo'}
+            </span>
+          </div>
+        </div>
 
-        {activeAlertsCount > 0 && (
-          <button
-            type="button"
-            onClick={onReplayPendingAlerts}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/35 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-          >
-            <BellRing className="w-3.5 h-3.5 text-rose-400" />
-            <span>Ver Alertas ({activeAlertsCount})</span>
-          </button>
-        )}
-
-        <button
-          type="button"
-          onClick={onTestSoundToast}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-          title="Disparar notificação sonora de teste"
-        >
-          <BellRing className="w-3.5 h-3.5 text-amber-400" />
-          <span>Testar Som</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={onToggleMute}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-            soundMuted
-              ? 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
-          }`}
-          title={soundMuted ? 'Reativar alertas sonoros' : 'Silenciar alertas sonoros'}
-        >
-          {soundMuted ? (
-            <>
-              <VolumeX className="w-3.5 h-3.5 text-slate-400" />
-              <span>Som Silenciado</span>
-            </>
-          ) : (
-            <>
-              <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Som Ativo</span>
-            </>
+        <div className="flex flex-wrap items-center gap-2">
+          {audioBlocked && !soundMuted && (
+            <button
+              type="button"
+              onClick={onUnlockAudio}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition-colors whitespace-nowrap shrink-0"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>Ativar Áudio Agora</span>
+            </button>
           )}
-        </button>
+
+          {activeAlertsCount > 0 && (
+            <button
+              type="button"
+              onClick={onReplayPendingAlerts}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/35 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              <BellRing className="w-3.5 h-3.5 text-rose-400" />
+              <span>Ver Alertas ({activeAlertsCount})</span>
+            </button>
+          )}
+
+          {onTogglePush && pushStatus !== 'unsupported' && (
+            <button
+              type="button"
+              onClick={onTogglePush}
+              disabled={pushLoading || pushStatus === 'blocked'}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap shrink-0 disabled:opacity-60 ${
+                pushStatus === 'blocked'
+                  ? 'bg-rose-950/30 border-rose-500/40 text-rose-300 cursor-not-allowed'
+                  : isPushActive
+                  ? 'bg-sky-500/15 border-sky-500/40 text-sky-300 hover:bg-sky-500/25'
+                  : 'bg-amber-500 hover:bg-amber-400 border-amber-400 text-slate-950 font-bold'
+              }`}
+              title={
+                pushStatus === 'blocked'
+                  ? 'Permissão de notificações bloqueada nas configurações do navegador'
+                  : isPushActive
+                  ? 'Notificações Push ativadas neste dispositivo (clique para pausar)'
+                  : 'Ativar notificações push para novas viagens e manutenções'
+              }
+            >
+              {pushStatus === 'blocked' ? (
+                <BellOff className="w-3.5 h-3.5" />
+              ) : (
+                <Smartphone className="w-3.5 h-3.5" />
+              )}
+              <span>
+                {pushLoading
+                  ? 'Ativando Push...'
+                  : pushStatus === 'blocked'
+                  ? 'Push Bloqueado'
+                  : isPushActive
+                  ? 'Push Ativo'
+                  : 'Ativar Notificações Push'}
+              </span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onTestSoundToast}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            title="Disparar notificação de teste"
+          >
+            <BellRing className="w-3.5 h-3.5 text-amber-400" />
+            <span>Testar Alerta</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleMute}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              soundMuted
+                ? 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
+            }`}
+            title={soundMuted ? 'Reativar alertas sonoros' : 'Silenciar alertas sonoros'}
+          >
+            {soundMuted ? (
+              <>
+                <VolumeX className="w-3.5 h-3.5 text-slate-400" />
+                <span>Som Silenciado</span>
+              </>
+            ) : (
+              <>
+                <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Som Ativo</span>
+              </>
+            )}
+          </button>
+        </div>
       </div>
+
+      {(isPushActive || pushFeedback) && (
+        <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex flex-wrap items-center gap-2">
+            {isPushActive && (
+              <>
+                <span className="text-slate-400 font-medium">Receber push para:</span>
+                {onToggleNotifyTrips && (
+                  <button
+                    type="button"
+                    onClick={onToggleNotifyTrips}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold transition-colors ${
+                      notifyTrips
+                        ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                        : 'bg-slate-950 border-slate-800 text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    <Navigation className="w-3 h-3" />
+                    <span>Novas Viagens</span>
+                  </button>
+                )}
+                {onToggleNotifyMaintenance && (
+                  <button
+                    type="button"
+                    onClick={onToggleNotifyMaintenance}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold transition-colors ${
+                      notifyMaintenance
+                        ? 'bg-orange-500/15 border-orange-500/40 text-orange-300'
+                        : 'bg-slate-950 border-slate-800 text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    <Wrench className="w-3 h-3" />
+                    <span>Manutenções Pendentes</span>
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          {pushFeedback && (
+            <span className="text-slate-300">{pushFeedback}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

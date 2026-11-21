@@ -26,8 +26,25 @@ import {
   VehicleChecklist,
   MaintenanceRecord,
   TripRequest,
-  TripRequestStatus
+  TripRequestStatus,
+  FcmDeviceRegistration
 } from '@/types/truck-service';
+
+export function sanitizeFirestoreData<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeFirestoreData(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v !== undefined) {
+        out[k] = sanitizeFirestoreData(v);
+      }
+    }
+    return out as T;
+  }
+  return value;
+}
 
 // --- USERS & PROFILES ---
 export async function getUserProfile(uid: string): Promise<UserProfile | null> {
@@ -236,7 +253,8 @@ export async function updateVehicleMileageMonitor(
   vehicleId: string,
   currentKm: number,
   nextPreventiveMaintenanceKm: number,
-  nextOilChangeKm?: number
+  nextOilChangeKm?: number,
+  nextPreventiveMaintenanceDate?: string
 ): Promise<void> {
   const path = `vehicles/${vehicleId}`;
   try {
@@ -246,6 +264,9 @@ export async function updateVehicleMileageMonitor(
     };
     if (typeof nextOilChangeKm === 'number' && !Number.isNaN(nextOilChangeKm)) {
       updates.nextOilChangeKm = nextOilChangeKm;
+    }
+    if (typeof nextPreventiveMaintenanceDate === 'string') {
+      updates.nextPreventiveMaintenanceDate = nextPreventiveMaintenanceDate.trim();
     }
     await updateDoc(doc(db, 'vehicles', vehicleId), updates);
   } catch (error) {
@@ -257,18 +278,33 @@ export async function recordPreventiveMaintenance(
   vehicleId: string,
   currentKm: number,
   intervalKm: number = 20000,
-  cost: number = 0
+  cost: number = 0,
+  intervalDays: number = 180,
+  nextDateOverride?: string
 ): Promise<void> {
   const path = `vehicles/${vehicleId}`;
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
     const nextKm = currentKm + intervalKm;
+
+    let nextDate = nextDateOverride?.trim() || '';
+    if (!nextDate) {
+      const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + Math.max(1, intervalDays));
+      const y = target.getFullYear();
+      const m = String(target.getMonth() + 1).padStart(2, '0');
+      const d = String(target.getDate()).padStart(2, '0');
+      nextDate = `${y}-${m}-${d}`;
+    }
+
     await updateDoc(doc(db, 'vehicles', vehicleId), {
       currentKm,
       lastPreventiveMaintenanceDate: today,
       lastPreventiveMaintenanceKm: currentKm,
       nextPreventiveMaintenanceKm: nextKm,
+      nextPreventiveMaintenanceDate: nextDate,
       preventiveIntervalKm: intervalKm,
+      preventiveIntervalDays: intervalDays,
     });
 
     const maintId = `maint-rev-${Date.now()}`;
@@ -692,11 +728,11 @@ export async function createVehicleChecklist(
   const path = 'vehicleChecklists';
   try {
     const id = `chk-${Date.now()}`;
-    const newChecklist: VehicleChecklist = {
+    const newChecklist: VehicleChecklist = sanitizeFirestoreData({
       ...checklistData,
       id,
       createdAt: new Date().toISOString(),
-    };
+    });
     await setDoc(doc(db, path, id), newChecklist);
 
     // Update vehicle currentKm if odometer in checklist is higher
@@ -773,6 +809,24 @@ export function subscribeDriverChecklists(
   );
 }
 
+export function subscribeAllVehicleChecklists(
+  onData: (checklists: VehicleChecklist[]) => void
+): () => void {
+  const path = 'vehicleChecklists';
+  return onSnapshot(
+    collection(db, path),
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ ...d.data(), id: d.id } as VehicleChecklist))
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      onData(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
 // --- TRIP REQUESTS (SOLICITAÇÕES DE VIAGENS PENDENTES) ---
 export async function getTripRequests(): Promise<TripRequest[]> {
   const path = 'tripRequests';
@@ -793,12 +847,12 @@ export async function createTripRequest(
   const path = 'tripRequests';
   try {
     const id = `trip-${Date.now()}`;
-    const newTrip: TripRequest = {
+    const newTrip: TripRequest = sanitizeFirestoreData({
       ...tripData,
       id,
       status: 'pending',
       createdAt: new Date().toISOString(),
-    };
+    });
     await setDoc(doc(db, path, id), newTrip);
 
     // Also emit driver notification for real-time alert tracking
@@ -854,6 +908,155 @@ export function subscribeDriverTripRequests(
       const items = snap.docs
         .map((d) => ({ ...d.data(), id: d.id } as TripRequest))
         .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      onData(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  );
+}
+
+export function subscribeAllTripRequests(
+  onData: (trips: TripRequest[]) => void
+): () => void {
+  const path = 'tripRequests';
+  return onSnapshot(
+    collection(db, path),
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ ...d.data(), id: d.id } as TripRequest))
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      onData(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+// --- FCM DEVICE TOKENS (NOTIFICAÇÕES PUSH PARA MOTORISTAS) ---
+function hashTokenShort(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+export function buildFcmTokenDocId(driverId: string, token: string): string {
+  const safeDriver = driverId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'drv';
+  return `fcm-${safeDriver}-${hashTokenShort(token)}`.slice(0, 128);
+}
+
+export async function saveDriverFcmToken(input: {
+  driverId: string;
+  driverName: string;
+  vehicleId?: string;
+  token: string;
+  registrationMode: 'fcm' | 'web_push_fallback';
+  browserLabel: string;
+  enabled: boolean;
+  notifyTrips: boolean;
+  notifyMaintenance: boolean;
+}): Promise<FcmDeviceRegistration> {
+  const id = buildFcmTokenDocId(input.driverId, input.token);
+  const path = `fcmTokens/${id}`;
+  try {
+    const existingSnap = await getDoc(doc(db, 'fcmTokens', id));
+    const existingData = existingSnap.exists()
+      ? (existingSnap.data() as Partial<FcmDeviceRegistration>)
+      : null;
+
+    const now = new Date().toISOString();
+    const record: FcmDeviceRegistration = {
+      id,
+      driverId: input.driverId.slice(0, 128),
+      driverName: (input.driverName || 'Motorista').slice(0, 120),
+      ...(input.vehicleId ? { vehicleId: input.vehicleId.slice(0, 128) } : {}),
+      token: input.token.slice(0, 512),
+      registrationMode: input.registrationMode,
+      platform: 'web',
+      browserLabel: (input.browserLabel || 'Navegador').slice(0, 120),
+      enabled: Boolean(input.enabled),
+      notifyTrips: Boolean(input.notifyTrips),
+      notifyMaintenance: Boolean(input.notifyMaintenance),
+      createdAt: existingData?.createdAt || now,
+      updatedAt: now,
+    };
+
+    await setDoc(doc(db, 'fcmTokens', id), record, { merge: true });
+    return record;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+    throw error;
+  }
+}
+
+export async function updateDriverFcmPreferences(
+  id: string,
+  prefs: Partial<Pick<FcmDeviceRegistration, 'enabled' | 'notifyTrips' | 'notifyMaintenance'>>
+): Promise<void> {
+  const path = `fcmTokens/${id}`;
+  try {
+    await updateDoc(doc(db, 'fcmTokens', id), {
+      ...prefs,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function getDriverFcmTokens(driverId: string): Promise<FcmDeviceRegistration[]> {
+  const path = 'fcmTokens';
+  try {
+    const q = query(collection(db, path), where('driverId', '==', driverId));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as FcmDeviceRegistration))
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export async function getAllFcmTokens(): Promise<FcmDeviceRegistration[]> {
+  const path = 'fcmTokens';
+  try {
+    const snap = await getDocs(collection(db, path));
+    return snap.docs.map((d) => ({ ...d.data(), id: d.id } as FcmDeviceRegistration));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export async function disableDriverFcmToken(id: string): Promise<void> {
+  const path = `fcmTokens/${id}`;
+  try {
+    await updateDoc(doc(db, 'fcmTokens', id), {
+      enabled: false,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export function subscribeDriverFcmTokens(
+  driverId: string,
+  onData: (regs: FcmDeviceRegistration[]) => void
+): () => void {
+  const path = 'fcmTokens';
+  const q = query(collection(db, path), where('driverId', '==', driverId));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ ...d.data(), id: d.id } as FcmDeviceRegistration))
+        .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
       onData(items);
     },
     (error) => {

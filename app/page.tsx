@@ -17,6 +17,8 @@ import {
   getVehicleChecklists,
   getMaintenanceRecords,
   getTripRequests,
+  subscribeAllTripRequests,
+  subscribeAllVehicleChecklists,
 } from '@/services/firestoreService';
 import {
   Driver,
@@ -116,6 +118,23 @@ function TruckAppInner() {
     }
     init();
   }, []);
+
+  // Real-time admin sync when drivers respond to trips or submit vehicle checklists
+  const profileUid = profile?.uid;
+  const profileRole = profile?.role;
+  useEffect(() => {
+    if (!profileUid || profileRole !== 'admin') return;
+    const unsubTrips = subscribeAllTripRequests((items) => {
+      setTripRequests(items);
+    });
+    const unsubChecklists = subscribeAllVehicleChecklists((items) => {
+      setChecklists(items);
+    });
+    return () => {
+      unsubTrips();
+      unsubChecklists();
+    };
+  }, [profileUid, profileRole]);
 
   const handleCredentialsLogin = async (e: React.FormEvent) => {
     e.preventDefault();

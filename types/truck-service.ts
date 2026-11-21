@@ -16,7 +16,7 @@ export interface Driver {
   rg: string;
   cpf: string;
   address: string;
-  cnhCategory: 'C' | 'D' | 'E';
+  cnhCategory: 'B' | 'C' | 'D' | 'E';
   cnhNumber: string;
   cnhExpiry: string; // YYYY-MM-DD
   vehicleId?: string; // Placa ou ID do veículo vinculado
@@ -39,7 +39,9 @@ export interface Vehicle {
   lastPreventiveMaintenanceDate?: string;
   lastPreventiveMaintenanceKm?: number;
   nextPreventiveMaintenanceKm?: number;
+  nextPreventiveMaintenanceDate?: string; // YYYY-MM-DD
   preventiveIntervalKm?: number;
+  preventiveIntervalDays?: number;
   filtersReplaced: boolean;
   alertDismissed?: boolean;
   createdAt: string;
@@ -208,3 +210,18 @@ export interface TripRequest {
   respondedAt?: string;
 }
 
+export interface FcmDeviceRegistration {
+  id: string;
+  driverId: string;
+  driverName: string;
+  vehicleId?: string;
+  token: string;
+  registrationMode: 'fcm' | 'web_push_fallback';
+  platform: 'web';
+  browserLabel: string;
+  enabled: boolean;
+  notifyTrips: boolean;
+  notifyMaintenance: boolean;
+  createdAt: string;
+  updatedAt: string;
+}

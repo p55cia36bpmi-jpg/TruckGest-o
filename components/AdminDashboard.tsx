@@ -35,13 +35,17 @@ import {
   deleteDailyReport,
   deleteVehicleChecklist,
   createTripRequest,
-  deleteTripRequest
+  deleteTripRequest,
+  createNotification
 } from '@/services/firestoreService';
+import { sendDriverPushAlert } from '@/lib/fcmClientSend';
 import { MercosulPlate } from './MercosulPlate';
 import { Modal } from './Modal';
 import { PrintReportsModal } from './PrintReportsModal';
 import { AdminChecklistsView } from './AdminChecklistsView';
 import { MonthlyCostsChart } from './MonthlyCostsChart';
+import { FuelVsMaintenanceChart } from './FuelVsMaintenanceChart';
+import { VehicleCpmAnalyticsPanel } from './VehicleCpmAnalyticsPanel';
 import { 
   LayoutDashboard, 
   Truck, 
@@ -81,96 +85,22 @@ import {
   Gauge,
   SlidersHorizontal,
   Navigation,
-  Send
+  Send,
+  BellRing
 } from 'lucide-react';
 
-export interface DriverCnhStatus {
-  driver: Driver;
-  daysRemaining: number;
-  isExpired: boolean;
-  isCritical: boolean; // <= 30 days
-  expiryFormatted: string;
-}
+import {
+  DriverCnhStatus,
+  checkDriverCnhStatus,
+  addDaysToIsoDate,
+  evaluatePreventiveDate,
+  VehiclePreventiveStatus,
+  checkVehiclePreventiveStatus,
+  getPreventiveAlertReasons,
+} from '@/lib/fleetAlerts';
 
-/**
- * Função de verificação no Painel do Administrador que identifica
- * motoristas cuja CNH vencerá nos próximos 30 dias (ou já está vencida).
- */
-export function checkDriverCnhStatus(driver: Driver, referenceDate = new Date()): DriverCnhStatus {
-  if (!driver.cnhExpiry) {
-    return {
-      driver,
-      daysRemaining: 9999,
-      isExpired: false,
-      isCritical: false,
-      expiryFormatted: 'Não informada',
-    };
-  }
-
-  const parts = driver.cnhExpiry.split('-').map(Number);
-  const expiry = new Date(parts[0], parts[1] - 1, parts[2]);
-  const refMidnight = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate());
-  const expiryMidnight = new Date(expiry.getFullYear(), expiry.getMonth(), expiry.getDate());
-  
-  const diffTime = expiryMidnight.getTime() - refMidnight.getTime();
-  const daysRemaining = Math.round(diffTime / (1000 * 60 * 60 * 24));
-  
-  const isExpired = daysRemaining < 0;
-  const isCritical = daysRemaining <= 30; // Vence em até 30 dias ou já vencida
-  const expiryFormatted = driver.cnhExpiry.split('-').reverse().join('/');
-
-  return {
-    driver,
-    daysRemaining,
-    isExpired,
-    isCritical,
-    expiryFormatted,
-  };
-}
-
-export interface VehiclePreventiveStatus {
-  vehicle: Vehicle;
-  currentKm: number;
-  limitKm: number;
-  baselineKm: number;
-  remainingKm: number;
-  exceededKm: number;
-  isExceeded: boolean;
-  isWarning: boolean;
-  progressPercent: number;
-}
-
-/**
- * Avalia o monitoramento de quilometragem do veículo em relação ao limite
- * configurado para a próxima revisão preventiva.
- */
-export function checkVehiclePreventiveStatus(vehicle: Vehicle): VehiclePreventiveStatus {
-  const currentKm = vehicle.currentKm || 0;
-  const limitKm = vehicle.nextPreventiveMaintenanceKm ?? vehicle.nextOilChangeKm;
-  const baselineKm = vehicle.lastPreventiveMaintenanceKm ?? vehicle.lastOilChangeKm ?? 0;
-  const remainingKm = limitKm - currentKm;
-  const exceededKm = Math.max(0, currentKm - limitKm);
-  const isExceeded = currentKm > limitKm;
-  const isWarning = !isExceeded && remainingKm <= 1000;
-
-  const span = Math.max(1, limitKm - baselineKm);
-  const rawPercent = ((currentKm - baselineKm) / span) * 100;
-  const progressPercent = isExceeded
-    ? 100
-    : Math.min(100, Math.max(0, Math.round(rawPercent)));
-
-  return {
-    vehicle,
-    currentKm,
-    limitKm,
-    baselineKm,
-    remainingKm,
-    exceededKm,
-    isExceeded,
-    isWarning,
-    progressPercent,
-  };
-}
+export { checkDriverCnhStatus, checkVehiclePreventiveStatus };
+export type { DriverCnhStatus, VehiclePreventiveStatus };
 
 interface AdminDashboardProps {
   drivers: Driver[];
@@ -236,12 +166,16 @@ export function AdminDashboard({
   const [revealedPasswordIds, setRevealedPasswordIds] = useState<Record<string, boolean>>({});
   const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
   const [vehicleMonitorFilter, setVehicleMonitorFilter] = useState<'all' | 'exceeded' | 'warning' | 'ok'>('all');
+  const [vehicleSearchQuery, setVehicleSearchQuery] = useState('');
   const [vehicleFeedback, setVehicleFeedback] = useState<string | null>(null);
+  const [sendingMaintPushId, setSendingMaintPushId] = useState<string | null>(null);
+  const [isSendingBulkMaintPush, setIsSendingBulkMaintPush] = useState(false);
   const [isMileageConfigModalOpen, setIsMileageConfigModalOpen] = useState(false);
   const [selectedVehicleForMileage, setSelectedVehicleForMileage] = useState<Vehicle | null>(null);
   const [mileageConfigForm, setMileageConfigForm] = useState({
     currentKm: 0,
     nextPreventiveMaintenanceKm: 20000,
+    nextPreventiveMaintenanceDate: addDaysToIsoDate(180),
     nextOilChangeKm: 20000,
   });
   const [isPreventiveModalOpen, setIsPreventiveModalOpen] = useState(false);
@@ -249,6 +183,7 @@ export function AdminDashboard({
   const [preventiveForm, setPreventiveForm] = useState({
     currentKm: 0,
     intervalKm: 20000,
+    intervalDays: 180,
     cost: 0,
   });
   const [isRateModalOpen, setIsRateModalOpen] = useState(false);
@@ -295,7 +230,7 @@ export function AdminDashboard({
     rg: '',
     cpf: '',
     address: '',
-    cnhCategory: 'E' as 'C' | 'D' | 'E',
+    cnhCategory: 'E' as 'B' | 'C' | 'D' | 'E',
     cnhNumber: '',
     cnhExpiry: '2028-12-31',
     vehicleId: '',
@@ -313,6 +248,7 @@ export function AdminDashboard({
     lastOilChangeKm: 0,
     nextOilChangeKm: 20000,
     nextPreventiveMaintenanceKm: 20000,
+    nextPreventiveMaintenanceDate: addDaysToIsoDate(180),
     filtersReplaced: true,
   });
 
@@ -605,9 +541,10 @@ export function AdminDashboard({
       lastPreventiveMaintenanceDate: newVehicle.lastOilChangeDate,
       lastPreventiveMaintenanceKm: newVehicle.lastOilChangeKm,
       nextPreventiveMaintenanceKm: newVehicle.nextPreventiveMaintenanceKm || newVehicle.nextOilChangeKm,
+      nextPreventiveMaintenanceDate: newVehicle.nextPreventiveMaintenanceDate || undefined,
     });
     setIsVehicleModalOpen(false);
-    setVehicleFeedback(`Veículo ${newVehicle.plate.toUpperCase().trim()} cadastrado no monitoramento de quilometragem.`);
+    setVehicleFeedback(`Veículo ${newVehicle.plate.toUpperCase().trim()} cadastrado no monitoramento preventivo.`);
     onRefreshData();
   };
 
@@ -618,10 +555,14 @@ export function AdminDashboard({
       selectedVehicleForMileage.id,
       mileageConfigForm.currentKm,
       mileageConfigForm.nextPreventiveMaintenanceKm,
-      mileageConfigForm.nextOilChangeKm
+      mileageConfigForm.nextOilChangeKm,
+      mileageConfigForm.nextPreventiveMaintenanceDate
     );
+    const dateLabel = mileageConfigForm.nextPreventiveMaintenanceDate
+      ? ` · Próx. data: ${mileageConfigForm.nextPreventiveMaintenanceDate.split('-').reverse().join('/')}`
+      : '';
     setVehicleFeedback(
-      `Monitoramento de quilometragem de ${selectedVehicleForMileage.plate} atualizado (Odômetro: ${mileageConfigForm.currentKm.toLocaleString('pt-BR')} km · Limite revisão: ${mileageConfigForm.nextPreventiveMaintenanceKm.toLocaleString('pt-BR')} km).`
+      `Monitoramento preventivo de ${selectedVehicleForMileage.plate} atualizado (Odômetro: ${mileageConfigForm.currentKm.toLocaleString('pt-BR')} km · Limite: ${mileageConfigForm.nextPreventiveMaintenanceKm.toLocaleString('pt-BR')} km${dateLabel}).`
     );
     setIsMileageConfigModalOpen(false);
     setSelectedVehicleForMileage(null);
@@ -635,10 +576,12 @@ export function AdminDashboard({
       selectedVehicleForPreventive.id,
       preventiveForm.currentKm,
       preventiveForm.intervalKm,
-      preventiveForm.cost
+      preventiveForm.cost,
+      preventiveForm.intervalDays
     );
+    const nextDateFormatted = addDaysToIsoDate(preventiveForm.intervalDays).split('-').reverse().join('/');
     setVehicleFeedback(
-      `Revisão preventiva de ${selectedVehicleForPreventive.plate} registrada aos ${preventiveForm.currentKm.toLocaleString('pt-BR')} km! Próximo limite: ${(preventiveForm.currentKm + preventiveForm.intervalKm).toLocaleString('pt-BR')} km.`
+      `Revisão preventiva de ${selectedVehicleForPreventive.plate} registrada aos ${preventiveForm.currentKm.toLocaleString('pt-BR')} km! Próximo limite: ${(preventiveForm.currentKm + preventiveForm.intervalKm).toLocaleString('pt-BR')} km ou ${nextDateFormatted}.`
     );
     setIsPreventiveModalOpen(false);
     setSelectedVehicleForPreventive(null);
@@ -802,22 +745,53 @@ export function AdminDashboard({
 
     setIsDispatchingTrip(true);
     try {
-      await createTripRequest({
+      const origin = tripDispatchForm.origin.trim();
+      const destination = tripDispatchForm.destination.trim();
+      const cargo = tripDispatchForm.cargoDescription.trim();
+
+      const createdTrip = await createTripRequest({
         driverId: drv.id,
         driverName: drv.name,
         vehicleId: veh.id,
         vehiclePlate: veh.plate,
-        origin: tripDispatchForm.origin.trim(),
-        destination: tripDispatchForm.destination.trim(),
-        cargoDescription: tripDispatchForm.cargoDescription.trim(),
+        origin,
+        destination,
+        cargoDescription: cargo,
         estimatedFreight: Number(tripDispatchForm.estimatedFreight) || 0,
         scheduledDate: tripDispatchForm.scheduledDate,
         priority: tripDispatchForm.priority,
         notes: tripDispatchForm.notes.trim() || undefined,
         createdByAdminEmail: adminProfile.email,
       });
+
+      let pushInfo = 'O motorista receberá o alerta no portal.';
+      try {
+        const pushRes = await sendDriverPushAlert({
+          driverId: drv.id,
+          category: 'trip_request',
+          title:
+            tripDispatchForm.priority === 'urgent'
+              ? `Viagem Urgente: ${origin} → ${destination}`
+              : `Nova Solicitação de Viagem: ${origin} → ${destination}`,
+          body: `Veículo ${veh.plate} · Carga: ${cargo} · Data: ${tripDispatchForm.scheduledDate
+            .split('-')
+            .reverse()
+            .join('/')}`,
+          priority: tripDispatchForm.priority,
+          data: {
+            tripId: createdTrip.id,
+            vehicleId: veh.id,
+            vehiclePlate: veh.plate,
+          },
+          senderEmail: adminProfile.email,
+        });
+        pushInfo = pushRes.message;
+      } catch (pushErr) {
+        console.warn('Falha ao disparar push da viagem:', pushErr);
+      }
+
       setTripDispatchFeedback(
-        `Solicitação de viagem enviada para ${drv.name} (${tripDispatchForm.origin} → ${tripDispatchForm.destination}). O motorista receberá o alerta sonoro no portal.`
+        `Solicitação de viagem enviada para ${drv.name} (${origin} → ${destination}). ${pushInfo}`
       );
       setIsTripDispatchModalOpen(false);
       await onRefreshData();
@@ -857,13 +831,14 @@ export function AdminDashboard({
   // Check vehicles with oil alerts (< 200 km)
   const vehiclesWithOilAlert = vehicles.filter((v) => (v.nextOilChangeKm - v.currentKm) <= 200);
 
-  // Mileage monitoring statuses for preventive maintenance limits
+  // Preventive maintenance monitoring statuses (by mileage OR date)
   const vehicleMileageStatuses = useMemo(() => {
     return vehicles
       .map((v) => checkVehiclePreventiveStatus(v))
       .sort((a, b) => {
         if (a.isExceeded !== b.isExceeded) return a.isExceeded ? -1 : 1;
         if (a.isWarning !== b.isWarning) return a.isWarning ? -1 : 1;
+        if (a.isDateExceeded !== b.isDateExceeded) return a.isDateExceeded ? -1 : 1;
         return a.remainingKm - b.remainingKm;
       });
   }, [vehicles]);
@@ -879,9 +854,157 @@ export function AdminDashboard({
   const vehiclesAttentionCount = useMemo(() => {
     const ids = new Set<string>();
     exceededMileageVehicles.forEach((s) => ids.add(s.vehicle.id));
+    warningMileageVehicles.forEach((s) => ids.add(s.vehicle.id));
     vehiclesWithOilAlert.forEach((v) => ids.add(v.id));
     return ids.size;
-  }, [exceededMileageVehicles, vehiclesWithOilAlert]);
+  }, [exceededMileageVehicles, warningMileageVehicles, vehiclesWithOilAlert]);
+
+  const handleSendVehicleMaintenancePush = async (status: VehiclePreventiveStatus) => {
+    const v = status.vehicle;
+    const linkedDriver = drivers.find((d) => d.vehicleId === v.id);
+    if (!linkedDriver) {
+      setVehicleFeedback(
+        `O veículo ${v.plate} ainda não possui motorista vinculado para receber o alerta push.`
+      );
+      return;
+    }
+
+    setSendingMaintPushId(v.id);
+    try {
+      const reasons = getPreventiveAlertReasons(status);
+      const oilKmLeft = v.nextOilChangeKm - status.currentKm;
+      if (oilKmLeft <= 200) {
+        reasons.push(
+          oilKmLeft <= 0
+            ? 'Troca de óleo vencida'
+            : `Troca de óleo em ${oilKmLeft.toLocaleString('pt-BR')} km`
+        );
+      }
+      const title = status.isExceeded
+        ? `Manutenção Vencida: ${v.plate}`
+        : `Manutenção Pendente: ${v.plate}`;
+      const body =
+        reasons.join(' · ') ||
+        `Veículo ${v.plate} (${v.model}) requer revisão preventiva ou troca de óleo.`;
+
+      await createNotification({
+        targetRole: 'driver',
+        targetUserId: linkedDriver.id,
+        title,
+        message: body,
+        type: status.isExceeded ? 'critical' : 'warning',
+        read: false,
+      });
+
+      const pushRes = await sendDriverPushAlert({
+        driverId: linkedDriver.id,
+        category: 'maintenance',
+        title,
+        body,
+        priority: status.isExceeded ? 'urgent' : 'normal',
+        data: {
+          vehicleId: v.id,
+          vehiclePlate: v.plate,
+        },
+        senderEmail: adminProfile.email,
+      });
+
+      setVehicleFeedback(
+        `Alerta de manutenção enviado para ${linkedDriver.name} (${v.plate}). ${pushRes.message}`
+      );
+    } catch (err) {
+      setVehicleFeedback(
+        err instanceof Error
+          ? err.message
+          : `Erro ao enviar notificação push para ${linkedDriver.name}.`
+      );
+    } finally {
+      setSendingMaintPushId(null);
+    }
+  };
+
+  const handleSendBulkMaintenancePush = async () => {
+    const pendingStatuses = vehicleMileageStatuses.filter((s) => {
+      const oilUrgent = s.vehicle.nextOilChangeKm - s.currentKm <= 200;
+      return s.isExceeded || s.isWarning || oilUrgent;
+    });
+
+    const targets = pendingStatuses
+      .map((s) => ({
+        status: s,
+        driver: drivers.find((d) => d.vehicleId === s.vehicle.id),
+      }))
+      .filter((item): item is { status: VehiclePreventiveStatus; driver: Driver } =>
+        Boolean(item.driver)
+      );
+
+    if (targets.length === 0) {
+      setVehicleFeedback(
+        'Não há veículos com manutenção pendente vinculados a motoristas cadastrados.'
+      );
+      return;
+    }
+
+    setIsSendingBulkMaintPush(true);
+    try {
+      let fcmDispatched = 0;
+      for (const { status, driver } of targets) {
+        const v = status.vehicle;
+        const reasons = getPreventiveAlertReasons(status);
+        const oilKmLeft = v.nextOilChangeKm - status.currentKm;
+        if (oilKmLeft <= 200) {
+          reasons.push(
+            oilKmLeft <= 0
+              ? 'Troca de óleo vencida'
+              : `Troca de óleo em ${oilKmLeft.toLocaleString('pt-BR')} km`
+          );
+        }
+        const title = status.isExceeded
+          ? `Manutenção Vencida: ${v.plate}`
+          : `Manutenção Pendente: ${v.plate}`;
+        const body =
+          reasons.join(' · ') ||
+          `Veículo ${v.plate} (${v.model}) requer revisão preventiva.`;
+
+        await createNotification({
+          targetRole: 'driver',
+          targetUserId: driver.id,
+          title,
+          message: body,
+          type: status.isExceeded ? 'critical' : 'warning',
+          read: false,
+        });
+
+        const pushRes = await sendDriverPushAlert({
+          driverId: driver.id,
+          category: 'maintenance',
+          title,
+          body,
+          priority: status.isExceeded ? 'urgent' : 'normal',
+          data: {
+            vehicleId: v.id,
+            vehiclePlate: v.plate,
+          },
+          senderEmail: adminProfile.email,
+        });
+        fcmDispatched += pushRes.sentCount;
+      }
+
+      setVehicleFeedback(
+        `Notificações de manutenção enviadas para ${targets.length} motorista(s)${
+          fcmDispatched > 0 ? ` (${fcmDispatched} push FCM entregue(s))` : ' no portal e Web Push'
+        }.`
+      );
+    } catch (err) {
+      setVehicleFeedback(
+        err instanceof Error
+          ? err.message
+          : 'Erro ao disparar notificações de manutenção em lote.'
+      );
+    } finally {
+      setIsSendingBulkMaintPush(false);
+    }
+  };
 
   // Check open checklists with anomalies
   const openAnomalyChecklists = useMemo(() => {
@@ -931,6 +1054,7 @@ export function AdminDashboard({
           { id: 'tolls', label: 'Pedágios', icon: DollarSign },
           { id: 'payments', label: 'Cálculo de Pagamentos', icon: Calculator },
           { id: 'history', label: 'Histórico de Pagamentos', icon: History },
+          { id: 'cpm-analysis', label: 'Análise CPM', icon: Gauge },
           { id: 'financial-report', label: 'Relatório Financeiro', icon: FileSpreadsheet },
         ].map((tab) => {
           const Icon = tab.icon;
@@ -948,7 +1072,13 @@ export function AdminDashboard({
               <Icon className="w-4 h-4" />
               <span>{tab.label}</span>
               {tab.alertBadge && tab.alertBadge > 0 ? (
-                <span className="px-1.5 py-0.5 rounded-full bg-rose-500 text-white font-mono text-[10px] font-bold">
+                <span
+                  className={`px-1.5 py-0.5 rounded-full font-mono text-[10px] font-bold ${
+                    tab.id === 'vehicles' && exceededMileageVehicles.length === 0
+                      ? 'bg-yellow-400 text-slate-950'
+                      : 'bg-rose-500 text-white'
+                  }`}
+                >
                   {tab.alertBadge}
                 </span>
               ) : tab.badge && tab.badge > 0 ? (
@@ -962,7 +1092,7 @@ export function AdminDashboard({
       </div>
 
       {/* Global Filter Bar for Dashboard & Reports */}
-      {(activeTab === 'dashboard' || activeTab === 'financial-report' || activeTab === 'reports') && (
+      {(activeTab === 'dashboard' || activeTab === 'cpm-analysis' || activeTab === 'financial-report' || activeTab === 'reports') && (
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs font-semibold text-slate-400 flex items-center gap-1">
@@ -1251,7 +1381,7 @@ export function AdminDashboard({
             </div>
           )}
 
-          {/* ALERTA PRIORITÁRIO DE MONITORAMENTO DE QUILOMETRAGEM: REVISÃO PREVENTIVA ULTRAPASSADA */}
+          {/* ALERTA PRIORITÁRIO DE MANUTENÇÃO PREVENTIVA (QUILOMETRAGEM OU DATA VENCIDA) */}
           {exceededMileageVehicles.length > 0 && (
             <div className="bg-gradient-to-r from-rose-950/50 via-slate-900 to-rose-950/25 border-2 border-rose-500/80 p-5 rounded-2xl shadow-xl shadow-rose-950/30 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -1263,14 +1393,14 @@ export function AdminDashboard({
                     <div className="flex flex-wrap items-center gap-2">
                       <h4 className="text-sm font-bold text-rose-100 uppercase tracking-wide flex items-center gap-1.5">
                         <AlertTriangle className="w-4 h-4 text-rose-400" />
-                        Monitoramento de Quilometragem: Revisão Preventiva Ultrapassada
+                        Alerta Preventivo: Manutenção Vencida (Km ou Data)
                       </h4>
                       <span className="px-2 py-0.5 rounded-full bg-rose-500 text-white font-mono text-[10px] font-bold">
-                        {exceededMileageVehicles.length} veículo{exceededMileageVehicles.length > 1 ? 's' : ''} acima do limite
+                        {exceededMileageVehicles.length} veículo{exceededMileageVehicles.length > 1 ? 's' : ''} em alerta vermelho
                       </span>
                     </div>
                     <p className="text-xs text-rose-200/80 mt-0.5">
-                      Os caminhões abaixo ultrapassaram o limite de quilometragem configurado para a próxima revisão preventiva. Agende a revisão imediatamente.
+                      Os veículos abaixo atingiram ou ultrapassaram a quilometragem limite ou a data prevista para revisão preventiva.
                     </p>
                   </div>
                 </div>
@@ -1283,12 +1413,12 @@ export function AdminDashboard({
                   className="px-3.5 py-2 bg-rose-500 hover:bg-rose-400 text-white font-bold rounded-xl text-xs transition-colors shadow-sm flex items-center gap-1.5 self-start sm:self-auto shrink-0"
                 >
                   <Gauge className="w-4 h-4" />
-                  <span>Monitorar Quilometragem</span>
+                  <span>Ver Lista de Veículos</span>
                 </button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-1">
-                {exceededMileageVehicles.map(({ vehicle, currentKm, limitKm, exceededKm }) => (
+                {exceededMileageVehicles.map(({ vehicle, currentKm, limitKm, exceededKm, isKmExceeded, isDateExceeded, nextDateFormatted, overdueDays }) => (
                   <div
                     key={vehicle.id}
                     className="bg-slate-950/85 border border-rose-500/50 rounded-xl p-3.5 flex flex-col justify-between space-y-2"
@@ -1302,16 +1432,103 @@ export function AdminDashboard({
                         <span className="text-[11px] text-slate-400 block">{vehicle.model}</span>
                       </div>
                       <span className="px-2 py-0.5 rounded bg-rose-500 text-white font-mono text-[10px] font-bold shrink-0">
-                        +{exceededKm.toLocaleString('pt-BR')} km
+                        {isKmExceeded
+                          ? exceededKm > 0
+                            ? `+${exceededKm.toLocaleString('pt-BR')} km`
+                            : 'LIMITE KM'
+                          : overdueDays === 0
+                          ? 'VENCE HOJE'
+                          : `-${overdueDays}d DATA`}
                       </span>
                     </div>
 
                     <div className="text-[11px] text-slate-300 flex items-center justify-between border-t border-slate-900 pt-2 font-mono">
-                      <span>Atual: <strong className="text-rose-300">{currentKm.toLocaleString('pt-BR')} km</strong></span>
-                      <span>Limite: <strong className="text-slate-200">{limitKm.toLocaleString('pt-BR')} km</strong></span>
+                      <span>Km: <strong className={isKmExceeded ? 'text-rose-300' : 'text-slate-200'}>{currentKm.toLocaleString('pt-BR')} / {limitKm.toLocaleString('pt-BR')}</strong></span>
+                      {nextDateFormatted && (
+                        <span className={isDateExceeded ? 'text-rose-300 font-bold' : 'text-slate-400'}>
+                          {nextDateFormatted}
+                        </span>
+                      )}
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* ALERTA PREVENTIVO AMARELO (QUILOMETRAGEM OU DATA PRÓXIMA) */}
+          {warningMileageVehicles.length > 0 && (
+            <div className="bg-gradient-to-r from-yellow-950/40 via-slate-900 to-amber-950/20 border-2 border-yellow-400/75 p-5 rounded-2xl shadow-lg shadow-yellow-950/25 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-yellow-400/20 border border-yellow-400/60 flex items-center justify-center text-yellow-300 shrink-0">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-sm font-bold text-yellow-100 uppercase tracking-wide flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                        Alerta Preventivo: Manutenção Próxima (Km ou Data)
+                      </h4>
+                      <span className="px-2 py-0.5 rounded-full bg-yellow-400 text-slate-950 font-mono text-[10px] font-bold">
+                        {warningMileageVehicles.length} veículo{warningMileageVehicles.length > 1 ? 's' : ''} em alerta amarelo
+                      </span>
+                    </div>
+                    <p className="text-xs text-yellow-200/80 mt-0.5">
+                      Os veículos abaixo estão a até 1.000 km do limite ou com revisão preventiva agendada para os próximos 15 dias.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVehicleMonitorFilter('warning');
+                    setActiveTab('vehicles');
+                  }}
+                  className="px-3.5 py-2 bg-yellow-400 hover:bg-yellow-300 text-slate-950 font-bold rounded-xl text-xs transition-colors shadow-sm flex items-center gap-1.5 self-start sm:self-auto shrink-0"
+                >
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>Ver Alertas Amarelos</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-1">
+                {warningMileageVehicles.map((status) => {
+                  const { vehicle, currentKm, limitKm, remainingKm, isKmWarning, isDateWarning, nextDateFormatted, daysRemaining } = status;
+                  return (
+                    <div
+                      key={vehicle.id}
+                      className="bg-slate-950/85 border border-yellow-400/50 rounded-xl p-3.5 flex flex-col justify-between space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0" />
+                            <strong className="text-slate-100 font-mono text-sm">{vehicle.plate}</strong>
+                          </div>
+                          <span className="text-[11px] text-slate-400 block">{vehicle.model}</span>
+                        </div>
+                        <span className="px-2 py-0.5 rounded bg-yellow-400 text-slate-950 font-mono text-[10px] font-bold shrink-0">
+                          {isKmWarning
+                            ? `-${remainingKm.toLocaleString('pt-BR')} km`
+                            : daysRemaining !== null
+                            ? `${daysRemaining}d REST.`
+                            : 'PRÓXIMA'}
+                        </span>
+                      </div>
+
+                      <div className="text-[11px] text-slate-300 flex items-center justify-between border-t border-slate-900 pt-2 font-mono">
+                        <span>Km: <strong className={isKmWarning ? 'text-yellow-300' : 'text-slate-200'}>{currentKm.toLocaleString('pt-BR')} / {limitKm.toLocaleString('pt-BR')}</strong></span>
+                        {nextDateFormatted && (
+                          <span className={isDateWarning ? 'text-yellow-300 font-bold' : 'text-slate-400'}>
+                            {nextDateFormatted}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1396,6 +1613,30 @@ export function AdminDashboard({
             maintenanceRecords={maintenanceRecords}
             drivers={drivers}
             vehicles={vehicles}
+            selectedDriverFilter={selectedDriverFilter}
+            selectedVehicleFilter={selectedVehicleFilter}
+          />
+
+          {/* Gráfico Recharts: Comparativo Direto Abastecimento vs. Manutenção */}
+          <FuelVsMaintenanceChart
+            dailyReports={dailyReports}
+            maintenanceRecords={maintenanceRecords}
+            drivers={drivers}
+            vehicles={vehicles}
+            selectedDriverFilter={selectedDriverFilter}
+            selectedVehicleFilter={selectedVehicleFilter}
+          />
+
+          {/* Painel de Análise Individual de CPM (Pagamentos + Abastecimento) */}
+          <VehicleCpmAnalyticsPanel
+            vehicles={vehicles}
+            drivers={drivers}
+            dailyReports={dailyReports}
+            payments={payments}
+            tolls={tolls}
+            maintenanceRecords={maintenanceRecords}
+            startDateFilter={startDateFilter}
+            endDateFilter={endDateFilter}
             selectedDriverFilter={selectedDriverFilter}
             selectedVehicleFilter={selectedVehicleFilter}
           />
@@ -1755,20 +1996,37 @@ export function AdminDashboard({
             <div>
               <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                 <Gauge className="w-4 h-4 text-amber-400" />
-                Monitoramento de Quilometragem & Revisão Preventiva da Frota
+                Lista de Veículos & Alertas de Manutenção Preventiva
               </h4>
               <p className="text-xs text-slate-400">
-                Acompanhe os limites configurados para revisão preventiva, troca de óleo e identifique veículos com quilometragem excedida
+                Alertas visuais em amarelo (próxima: ≤ 1.000 km ou ≤ 15 dias) e vermelho (vencida por km ou data) para cada veículo da frota
               </p>
             </div>
 
-            <button
-              onClick={() => setIsVehicleModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-sm shrink-0"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Cadastrar Veículo</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {(exceededMileageVehicles.length > 0 || warningMileageVehicles.length > 0 || vehiclesWithOilAlert.length > 0) && (
+                <button
+                  type="button"
+                  onClick={handleSendBulkMaintenancePush}
+                  disabled={isSendingBulkMaintPush}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-500/40 font-semibold text-xs rounded-xl transition-colors disabled:opacity-60"
+                  title="Enviar notificação push para motoristas com manutenções pendentes ou vencidas"
+                >
+                  <BellRing className="w-4 h-4 text-rose-400" />
+                  <span>
+                    {isSendingBulkMaintPush ? 'Enviando Push...' : 'Notificar Pendentes (Push)'}
+                  </span>
+                </button>
+              )}
+
+              <button
+                onClick={() => setIsVehicleModalOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-sm shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Cadastrar Veículo</span>
+              </button>
+            </div>
           </div>
 
           {vehicleFeedback && (
@@ -1787,7 +2045,7 @@ export function AdminDashboard({
             </div>
           )}
 
-          {/* Mileage Monitoring Summary KPIs */}
+          {/* Preventive Monitoring Summary KPIs */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
               <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
@@ -1797,99 +2055,136 @@ export function AdminDashboard({
               <div className="text-2xl font-bold font-mono text-slate-100 mt-1">
                 {vehicles.length}
               </div>
-              <div className="text-[10px] text-slate-500 mt-0.5">Veículos com odômetro ativo</div>
+              <div className="text-[10px] text-slate-500 mt-0.5">Veículos cadastrados</div>
             </div>
 
             <div className={`p-4 rounded-2xl border ${exceededMileageVehicles.length > 0 ? 'bg-rose-950/25 border-rose-500/60' : 'bg-slate-900 border-slate-800'}`}>
               <span className="text-[11px] font-semibold text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
                 <AlertOctagon className={`w-3.5 h-3.5 text-rose-400 ${exceededMileageVehicles.length > 0 ? 'animate-pulse' : ''}`} />
-                Limite Ultrapassado
+                Alerta Vermelho
               </span>
               <div className="text-2xl font-bold font-mono text-rose-400 mt-1">
                 {exceededMileageVehicles.length}
               </div>
-              <div className="text-[10px] text-rose-300/70 mt-0.5">Revisão preventiva vencida</div>
+              <div className="text-[10px] text-rose-300/70 mt-0.5">Km limite ou data vencida</div>
             </div>
 
-            <div className={`p-4 rounded-2xl border ${warningMileageVehicles.length > 0 ? 'bg-amber-950/25 border-amber-500/50' : 'bg-slate-900 border-slate-800'}`}>
-              <span className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                Próximos (≤ 1.000 km)
+            <div className={`p-4 rounded-2xl border ${warningMileageVehicles.length > 0 ? 'bg-yellow-950/25 border-yellow-400/60' : 'bg-slate-900 border-slate-800'}`}>
+              <span className="text-[11px] font-semibold text-yellow-300 uppercase tracking-wider flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" />
+                Alerta Amarelo
               </span>
-              <div className="text-2xl font-bold font-mono text-amber-400 mt-1">
+              <div className="text-2xl font-bold font-mono text-yellow-300 mt-1">
                 {warningMileageVehicles.length}
               </div>
-              <div className="text-[10px] text-slate-400 mt-0.5">Aproximando-se da revisão</div>
+              <div className="text-[10px] text-yellow-200/70 mt-0.5">≤ 1.000 km ou ≤ 15 dias</div>
             </div>
 
             <div className="bg-slate-900 border border-emerald-500/30 p-4 rounded-2xl">
               <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                Dentro do Limite
+                Em Dia
               </span>
               <div className="text-2xl font-bold font-mono text-emerald-400 mt-1">
                 {vehicleMileageStatuses.filter((s) => !s.isExceeded && !s.isWarning).length}
               </div>
-              <div className="text-[10px] text-slate-500 mt-0.5">Quilometragem regular</div>
+              <div className="text-[10px] text-slate-500 mt-0.5">Km e data regulares</div>
             </div>
           </div>
 
-          {/* Filter Pills */}
-          <div className="flex flex-wrap items-center gap-2 bg-slate-900 border border-slate-800 p-2 rounded-xl text-xs font-semibold">
-            <button
-              type="button"
-              onClick={() => setVehicleMonitorFilter('all')}
-              className={`px-3 py-1.5 rounded-lg transition-colors ${
-                vehicleMonitorFilter === 'all'
-                  ? 'bg-amber-500 text-slate-950 font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Todos ({vehicles.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setVehicleMonitorFilter('exceeded')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                vehicleMonitorFilter === 'exceeded'
-                  ? 'bg-rose-500 text-white font-bold'
-                  : 'text-rose-300 hover:bg-rose-950/40'
-              }`}
-            >
-              <AlertOctagon className="w-3.5 h-3.5" />
-              <span>Limite Ultrapassado ({exceededMileageVehicles.length})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setVehicleMonitorFilter('warning')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                vehicleMonitorFilter === 'warning'
-                  ? 'bg-amber-500 text-slate-950 font-bold'
-                  : 'text-amber-300 hover:bg-amber-950/30'
-              }`}
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Em Alerta / Próximos ({warningMileageVehicles.length})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setVehicleMonitorFilter('ok')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
-                vehicleMonitorFilter === 'ok'
-                  ? 'bg-emerald-500 text-slate-950 font-bold'
-                  : 'text-emerald-300 hover:bg-emerald-950/30'
-              }`}
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Regulares</span>
-            </button>
+          {/* Filter Pills + Search + Visual Alert Legend */}
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl space-y-3">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setVehicleMonitorFilter('all')}
+                  className={`px-3 py-1.5 rounded-lg transition-colors ${
+                    vehicleMonitorFilter === 'all'
+                      ? 'bg-amber-500 text-slate-950 font-bold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Todos ({vehicles.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVehicleMonitorFilter('exceeded')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                    vehicleMonitorFilter === 'exceeded'
+                      ? 'bg-rose-500 text-white font-bold'
+                      : 'text-rose-300 hover:bg-rose-950/40'
+                  }`}
+                >
+                  <AlertOctagon className={`w-3.5 h-3.5 ${vehicleMonitorFilter === 'exceeded' ? 'text-white' : 'text-rose-400'}`} />
+                  <span>Vermelho / Vencida ({exceededMileageVehicles.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVehicleMonitorFilter('warning')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                    vehicleMonitorFilter === 'warning'
+                      ? 'bg-yellow-400 text-slate-950 font-bold'
+                      : 'text-yellow-300 hover:bg-yellow-950/30'
+                  }`}
+                >
+                  <AlertTriangle className={`w-3.5 h-3.5 ${vehicleMonitorFilter === 'warning' ? 'text-slate-950' : 'text-yellow-400'}`} />
+                  <span>Amarelo / Próxima ({warningMileageVehicles.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVehicleMonitorFilter('ok')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${
+                    vehicleMonitorFilter === 'ok'
+                      ? 'bg-emerald-500 text-slate-950 font-bold'
+                      : 'text-emerald-300 hover:bg-emerald-950/30'
+                  }`}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Em Dia</span>
+                </button>
+              </div>
+
+              <div className="relative w-full lg:w-64">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={vehicleSearchQuery}
+                  onChange={(e) => setVehicleSearchQuery(e.target.value)}
+                  placeholder="Filtrar por placa ou modelo..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4 pt-2 border-t border-slate-800/80 text-[11px] text-slate-400">
+              <span className="flex items-center gap-1.5">
+                <AlertOctagon className="w-3.5 h-3.5 text-rose-400" />
+                <strong className="text-rose-300">Vermelho:</strong> Revisão vencida (km ≥ limite ou data vencida/hoje)
+              </span>
+              <span className="flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" />
+                <strong className="text-yellow-300">Amarelo:</strong> Manutenção próxima (≤ 1.000 km ou ≤ 15 dias)
+              </span>
+              <span className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                <strong className="text-emerald-300">Verde:</strong> Frota em dia
+              </span>
+            </div>
           </div>
 
           {/* Vehicle Cards Grid */}
           {(() => {
+            const q = vehicleSearchQuery.trim().toLowerCase();
             const displayedStatuses = vehicleMileageStatuses.filter((status) => {
+              if (q) {
+                const matchText =
+                  status.vehicle.plate.toLowerCase().includes(q) ||
+                  status.vehicle.model.toLowerCase().includes(q);
+                if (!matchText) return false;
+              }
               if (vehicleMonitorFilter === 'exceeded') return status.isExceeded;
-              if (vehicleMonitorFilter === 'warning') return status.isWarning || (status.vehicle.nextOilChangeKm - status.currentKm) <= 200;
+              if (vehicleMonitorFilter === 'warning') return status.isWarning || (!status.isExceeded && (status.vehicle.nextOilChangeKm - status.currentKm) <= 200);
               if (vehicleMonitorFilter === 'ok') return !status.isExceeded && !status.isWarning;
               return true;
             });
@@ -1904,46 +2199,95 @@ export function AdminDashboard({
 
             return (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {displayedStatuses.map(({ vehicle: v, currentKm, limitKm, remainingKm, exceededKm, isExceeded, isWarning, progressPercent }) => {
+                {displayedStatuses.map((status) => {
+                  const {
+                    vehicle: v,
+                    currentKm,
+                    limitKm,
+                    remainingKm,
+                    exceededKm,
+                    isKmExceeded,
+                    isKmWarning,
+                    nextDateFormatted,
+                    daysRemaining,
+                    overdueDays,
+                    isDateExceeded,
+                    isDateWarning,
+                    isExceeded,
+                    isWarning,
+                    alertSeverity,
+                    progressPercent,
+                  } = status;
                   const oilKmLeft = v.nextOilChangeKm - currentKm;
                   const isOilUrgent = oilKmLeft <= 200;
+                  const hasAnyYellowOrOil = isWarning || (!isExceeded && isOilUrgent);
+                  const alertReasons = getPreventiveAlertReasons(status);
 
                   return (
                     <div
                       key={v.id}
-                      className={`rounded-2xl p-5 space-y-4 shadow-sm flex flex-col justify-between transition-all ${
-                        isExceeded
-                          ? 'bg-rose-950/20 border-2 border-rose-500 shadow-lg shadow-rose-950/40'
-                          : isWarning || isOilUrgent
-                          ? 'bg-orange-950/20 border-2 border-orange-500/80'
-                          : 'bg-slate-900 border border-slate-800'
+                      data-alert-severity={alertSeverity}
+                      className={`relative overflow-hidden rounded-2xl p-5 space-y-4 flex flex-col justify-between transition-all ${
+                        alertSeverity === 'red'
+                          ? 'bg-gradient-to-b from-rose-950/35 via-slate-900 to-slate-900 border-2 border-rose-500 ring-1 ring-rose-500/40 shadow-lg shadow-rose-950/45'
+                          : hasAnyYellowOrOil
+                          ? 'bg-gradient-to-b from-yellow-950/25 via-slate-900 to-slate-900 border-2 border-yellow-400/90 ring-1 ring-yellow-400/30 shadow-md shadow-yellow-950/25'
+                          : 'bg-slate-900 border border-slate-800 shadow-sm'
                       }`}
                     >
+                      {/* Prominent Top Highlight Bar */}
+                      <div
+                        className={`h-1.5 -mx-5 -mt-5 mb-1 ${
+                          alertSeverity === 'red'
+                            ? 'bg-gradient-to-r from-rose-500 via-red-500 to-rose-400'
+                            : hasAnyYellowOrOil
+                            ? 'bg-gradient-to-r from-yellow-400 via-amber-400 to-yellow-300'
+                            : 'bg-emerald-500/60'
+                        }`}
+                      />
                       <div className="space-y-3">
-                        {/* Plate + Attention Badges */}
+                        {/* Plate + Prominent Yellow/Red Warning Icon & Badges */}
                         <div className="flex items-start justify-between gap-2">
-                          <MercosulPlate plate={v.plate} size="md" />
+                          <div className="flex items-center gap-2.5">
+                            {alertSeverity === 'red' ? (
+                              <div
+                                className="w-10 h-10 rounded-xl bg-rose-500/25 border border-rose-400/80 flex items-center justify-center text-rose-300 shrink-0 shadow-md shadow-rose-950/50"
+                                title={alertReasons.join(' · ') || 'Alerta Vermelho: Manutenção preventiva vencida (Km ou Data)'}
+                              >
+                                <AlertOctagon className="w-5 h-5 animate-pulse" />
+                              </div>
+                            ) : hasAnyYellowOrOil ? (
+                              <div
+                                className="w-10 h-10 rounded-xl bg-yellow-400/25 border border-yellow-400/80 flex items-center justify-center text-yellow-300 shrink-0 shadow-md shadow-yellow-950/30"
+                                title={alertReasons.join(' · ') || 'Alerta Amarelo: Manutenção preventiva próxima (Km ou Data)'}
+                              >
+                                <AlertTriangle className="w-5 h-5" />
+                              </div>
+                            ) : null}
+                            <MercosulPlate plate={v.plate} size="md" />
+                          </div>
+
                           <div className="flex flex-col items-end gap-1">
-                            {isExceeded ? (
+                            {alertSeverity === 'red' ? (
                               <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-rose-500 text-white flex items-center gap-1 shadow-md animate-pulse">
                                 <AlertOctagon className="w-3.5 h-3.5 shrink-0" />
-                                <span>REVISÃO ULTRAPASSADA</span>
+                                <span>MANUTENÇÃO VENCIDA</span>
                               </span>
                             ) : isWarning ? (
-                              <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1">
+                              <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-yellow-400 text-slate-950 flex items-center gap-1 shadow-sm">
                                 <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                                <span>REVISÃO PRÓXIMA</span>
+                                <span>MANUTENÇÃO PRÓXIMA</span>
                               </span>
                             ) : (
                               <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
                                 <CheckCircle2 className="w-3 h-3" />
-                                <span>OK</span>
+                                <span>EM DIA</span>
                               </span>
                             )}
 
                             {isOilUrgent && (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-orange-500 text-slate-950 flex items-center gap-1">
-                                <AlertTriangle className="w-3 h-3" />
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-yellow-500/20 text-yellow-300 border border-yellow-400/50 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 text-yellow-400" />
                                 <span>ÓLEO URGENTE</span>
                               </span>
                             )}
@@ -1951,37 +2295,84 @@ export function AdminDashboard({
                         </div>
 
                         <div>
-                          <h4 className="text-base font-bold text-slate-100">{v.model}</h4>
+                          <h4 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                            <span>{v.model}</span>
+                          </h4>
                           <p className="text-xs text-slate-400 flex items-center gap-1.5 mt-0.5">
-                            <Gauge className={`w-3.5 h-3.5 ${isExceeded ? 'text-rose-400' : 'text-amber-400'}`} />
+                            <Gauge className={`w-3.5 h-3.5 ${isExceeded ? 'text-rose-400' : isWarning ? 'text-yellow-400' : 'text-amber-400'}`} />
                             <span>Odômetro Atual:</span>
-                            <strong className={`font-mono ${isExceeded ? 'text-rose-300' : 'text-slate-100'}`}>
+                            <strong className={`font-mono ${isExceeded ? 'text-rose-300' : isWarning ? 'text-yellow-200' : 'text-slate-100'}`}>
                               {currentKm.toLocaleString('pt-BR')} km
                             </strong>
                           </p>
                         </div>
 
-                        {/* Overdue Callout Banner inside Card */}
-                        {isExceeded && (
-                          <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/50 flex items-center gap-2 text-xs text-rose-200">
-                            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 animate-bounce" />
-                            <div>
-                              <strong className="block text-rose-100">Limite Preventivo Excedido!</strong>
-                              <span className="font-mono text-[11px] text-rose-300">
-                                +{exceededKm.toLocaleString('pt-BR')} km acima do limite de {limitKm.toLocaleString('pt-BR')} km
-                              </span>
-                            </div>
+                        {/* Visual Warning Callout Banner (Red or Yellow) */}
+                        {(isExceeded || isWarning) && (
+                          <div
+                            className={`p-2.5 rounded-xl border space-y-1 text-xs ${
+                              isExceeded
+                                ? 'bg-rose-500/15 border-rose-500/50 text-rose-200'
+                                : 'bg-yellow-400/10 border-yellow-400/50 text-yellow-100'
+                            }`}
+                          >
+                            {isKmExceeded && (
+                              <div className="flex items-center gap-2">
+                                <AlertOctagon className="w-4 h-4 text-rose-400 shrink-0" />
+                                <span>
+                                  <strong className="text-rose-100">Quilometragem vencida:</strong>{' '}
+                                  <span className="font-mono text-rose-300">
+                                    {exceededKm > 0
+                                      ? `+${exceededKm.toLocaleString('pt-BR')} km acima do limite`
+                                      : `limite de ${limitKm.toLocaleString('pt-BR')} km atingido`}
+                                  </span>
+                                </span>
+                              </div>
+                            )}
+                            {isKmWarning && (
+                              <div className="flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0" />
+                                <span>
+                                  <strong className="text-yellow-200">Quilometragem próxima:</strong>{' '}
+                                  <span className="font-mono text-yellow-300">
+                                    faltam {remainingKm.toLocaleString('pt-BR')} km
+                                  </span>
+                                </span>
+                              </div>
+                            )}
+                            {isDateExceeded && nextDateFormatted && (
+                              <div className="flex items-center gap-2">
+                                <AlertOctagon className="w-4 h-4 text-rose-400 shrink-0" />
+                                <span>
+                                  <strong className="text-rose-100">Data preventiva vencida:</strong>{' '}
+                                  <span className="font-mono text-rose-300">
+                                    {overdueDays === 0 ? `vence hoje (${nextDateFormatted})` : `há ${overdueDays} dia(s) (${nextDateFormatted})`}
+                                  </span>
+                                </span>
+                              </div>
+                            )}
+                            {isDateWarning && nextDateFormatted && daysRemaining !== null && (
+                              <div className="flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0" />
+                                <span>
+                                  <strong className="text-yellow-200">Data preventiva próxima:</strong>{' '}
+                                  <span className="font-mono text-yellow-300">
+                                    em {daysRemaining} dia(s) ({nextDateFormatted})
+                                  </span>
+                                </span>
+                              </div>
+                            )}
                           </div>
                         )}
 
-                        {/* Preventive Maintenance Progress Bar */}
+                        {/* Preventive Maintenance Progress & Schedule Box */}
                         <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2.5 text-xs">
                           <div className="flex items-center justify-between">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
                               {isExceeded ? (
                                 <AlertOctagon className="w-3.5 h-3.5 text-rose-400" />
                               ) : isWarning ? (
-                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                                <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" />
                               ) : (
                                 <Gauge className="w-3.5 h-3.5 text-emerald-400" />
                               )}
@@ -1989,17 +2380,17 @@ export function AdminDashboard({
                             </span>
                             <span
                               className={`font-mono font-bold text-[11px] ${
-                                isExceeded
+                                isKmExceeded
                                   ? 'text-rose-400'
-                                  : isWarning
-                                  ? 'text-amber-400'
+                                  : isKmWarning
+                                  ? 'text-yellow-300'
                                   : 'text-emerald-400'
                               }`}
                             >
-                              {isExceeded
-                                ? `EXCEDEU ${exceededKm.toLocaleString('pt-BR')} km`
-                                : remainingKm === 0
-                                ? 'LIMITE ATINGIDO'
+                              {isKmExceeded
+                                ? exceededKm > 0
+                                  ? `EXCEDEU ${exceededKm.toLocaleString('pt-BR')} km`
+                                  : 'LIMITE ATINGIDO'
                                 : `Faltam ${remainingKm.toLocaleString('pt-BR')} km`}
                             </span>
                           </div>
@@ -2007,10 +2398,10 @@ export function AdminDashboard({
                           <div className="w-full h-2.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
                             <div
                               className={`h-full transition-all duration-300 ${
-                                isExceeded
+                                isKmExceeded
                                   ? 'bg-rose-500'
-                                  : isWarning
-                                  ? 'bg-amber-500'
+                                  : isKmWarning
+                                  ? 'bg-yellow-400'
                                   : 'bg-emerald-500'
                               }`}
                               style={{ width: `${progressPercent}%` }}
@@ -2018,10 +2409,39 @@ export function AdminDashboard({
                           </div>
 
                           <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-                            <span>Limite Configurado:</span>
-                            <strong className={isExceeded ? 'text-rose-300' : 'text-slate-200'}>
+                            <span>Limite Km Configurado:</span>
+                            <strong className={isKmExceeded ? 'text-rose-300' : isKmWarning ? 'text-yellow-300' : 'text-slate-200'}>
                               {limitKm.toLocaleString('pt-BR')} km
                             </strong>
+                          </div>
+
+                          <div className="flex justify-between items-center text-[11px] pt-1 border-t border-slate-900">
+                            <span className="text-slate-400 flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-slate-500" />
+                              Próxima Data Prevista:
+                            </span>
+                            {nextDateFormatted ? (
+                              <span
+                                className={`font-mono font-bold flex items-center gap-1 ${
+                                  isDateExceeded
+                                    ? 'text-rose-400'
+                                    : isDateWarning
+                                    ? 'text-yellow-300'
+                                    : 'text-emerald-400'
+                                }`}
+                              >
+                                {isDateExceeded ? (
+                                  <AlertOctagon className="w-3 h-3 text-rose-400" />
+                                ) : isDateWarning ? (
+                                  <AlertTriangle className="w-3 h-3 text-yellow-400" />
+                                ) : (
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                )}
+                                <span>{nextDateFormatted}</span>
+                              </span>
+                            ) : (
+                              <span className="text-slate-500 italic">Não configurada</span>
+                            )}
                           </div>
 
                           {v.lastPreventiveMaintenanceDate && (
@@ -2048,7 +2468,7 @@ export function AdminDashboard({
 
                           <div className="flex justify-between text-slate-400">
                             <span>Próxima Troca de Óleo:</span>
-                            <span className={`font-mono font-bold ${isOilUrgent ? 'text-orange-400' : 'text-slate-200'}`}>
+                            <span className={`font-mono font-bold ${isOilUrgent ? 'text-yellow-300' : 'text-slate-200'}`}>
                               {v.nextOilChangeKm.toLocaleString('pt-BR')} km ({oilKmLeft <= 0 ? 'VENCIDA!' : `faltam ${oilKmLeft.toLocaleString('pt-BR')} km`})
                             </span>
                           </div>
@@ -2084,19 +2504,33 @@ export function AdminDashboard({
                               setMileageConfigForm({
                                 currentKm: v.currentKm,
                                 nextPreventiveMaintenanceKm: v.nextPreventiveMaintenanceKm ?? v.nextOilChangeKm,
+                                nextPreventiveMaintenanceDate: v.nextPreventiveMaintenanceDate || '',
                                 nextOilChangeKm: v.nextOilChangeKm,
                               });
                               setIsMileageConfigModalOpen(true);
                             }}
                             className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-colors border border-slate-700"
-                            title="Atualizar odômetro e limite da próxima revisão preventiva"
+                            title="Atualizar odômetro, limite de km e data da próxima revisão preventiva"
                           >
                             <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
-                            <span>Km / Limite</span>
+                            <span>Km / Data</span>
                           </button>
                         </div>
 
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {(isExceeded || isWarning || isOilUrgent) && (
+                            <button
+                              type="button"
+                              onClick={() => handleSendVehicleMaintenancePush(status)}
+                              disabled={sendingMaintPushId === v.id}
+                              className="px-2.5 py-1.5 bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/35 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-colors disabled:opacity-60"
+                              title="Enviar notificação push de manutenção pendente ao motorista vinculado"
+                            >
+                              <BellRing className="w-3.5 h-3.5 text-sky-400" />
+                              <span>{sendingMaintPushId === v.id ? 'Enviando...' : 'Enviar Push'}</span>
+                            </button>
+                          )}
+
                           <button
                             type="button"
                             onClick={() => {
@@ -2104,6 +2538,7 @@ export function AdminDashboard({
                               setPreventiveForm({
                                 currentKm: v.currentKm,
                                 intervalKm: v.preventiveIntervalKm || 20000,
+                                intervalDays: v.preventiveIntervalDays || 180,
                                 cost: 0,
                               });
                               setIsPreventiveModalOpen(true);
@@ -2111,6 +2546,8 @@ export function AdminDashboard({
                             className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors ${
                               isExceeded
                                 ? 'bg-rose-500 hover:bg-rose-400 text-white shadow-sm'
+                                : isWarning
+                                ? 'bg-yellow-400 hover:bg-yellow-300 text-slate-950 shadow-sm'
                                 : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30'
                             }`}
                           >
@@ -2768,6 +3205,24 @@ export function AdminDashboard({
         </div>
       )}
 
+      {/* TAB: ANÁLISE DE CPM POR VEÍCULO (PAGAMENTOS + ABASTECIMENTO) */}
+      {activeTab === 'cpm-analysis' && (
+        <div className="space-y-6">
+          <VehicleCpmAnalyticsPanel
+            vehicles={vehicles}
+            drivers={drivers}
+            dailyReports={dailyReports}
+            payments={payments}
+            tolls={tolls}
+            maintenanceRecords={maintenanceRecords}
+            startDateFilter={startDateFilter}
+            endDateFilter={endDateFilter}
+            selectedDriverFilter={selectedDriverFilter}
+            selectedVehicleFilter={selectedVehicleFilter}
+          />
+        </div>
+      )}
+
       {/* TAB 9: RELATÓRIO FINANCEIRO COM AS 11 FÓRMULAS EXATAS (Section 9) */}
       {activeTab === 'financial-report' && (
         <div className="space-y-6">
@@ -2959,12 +3414,13 @@ export function AdminDashboard({
               <label className="block text-xs font-semibold text-slate-300 mb-1">Categoria CNH</label>
               <select
                 value={newDriver.cnhCategory}
-                onChange={(e) => setNewDriver({ ...newDriver, cnhCategory: e.target.value as 'C' | 'D' | 'E' })}
+                onChange={(e) => setNewDriver({ ...newDriver, cnhCategory: e.target.value as 'B' | 'C' | 'D' | 'E' })}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100"
               >
                 <option value="E">Cat. E (Articulados)</option>
                 <option value="D">Cat. D (Pesados)</option>
                 <option value="C">Cat. C (Médios)</option>
+                <option value="B">Cat. B (Leves / Utilitários)</option>
               </select>
             </div>
             <div>
@@ -3178,17 +3634,30 @@ export function AdminDashboard({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 pt-2">
-            <input
-              type="checkbox"
-              id="filterCheck"
-              checked={newVehicle.filtersReplaced}
-              onChange={(e) => setNewVehicle({ ...newVehicle, filtersReplaced: e.target.checked })}
-              className="rounded bg-slate-950 border-slate-800 text-amber-500"
-            />
-            <label htmlFor="filterCheck" className="text-xs text-slate-300">
-              Filtros foram trocados na última revisão
-            </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Data Próx. Revisão Preventiva</label>
+              <input
+                type="date"
+                value={newVehicle.nextPreventiveMaintenanceDate}
+                onChange={(e) => setNewVehicle({ ...newVehicle, nextPreventiveMaintenanceDate: e.target.value })}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+              />
+            </div>
+            <div className="flex items-end pb-2">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="filterCheck"
+                  checked={newVehicle.filtersReplaced}
+                  onChange={(e) => setNewVehicle({ ...newVehicle, filtersReplaced: e.target.checked })}
+                  className="rounded bg-slate-950 border-slate-800 text-amber-500"
+                />
+                <label htmlFor="filterCheck" className="text-xs text-slate-300">
+                  Filtros trocados na última revisão
+                </label>
+              </div>
+            </div>
           </div>
 
           <div className="pt-4 border-t border-slate-800 flex justify-end gap-2">
@@ -3209,15 +3678,15 @@ export function AdminDashboard({
         </form>
       </Modal>
 
-      {/* MODAL: CONFIGURAR QUILOMETRAGEM E LIMITE DA REVISÃO PREVENTIVA */}
+      {/* MODAL: CONFIGURAR QUILOMETRAGEM, LIMITE E DATA DA REVISÃO PREVENTIVA */}
       <Modal
         isOpen={isMileageConfigModalOpen}
         onClose={() => {
           setIsMileageConfigModalOpen(false);
           setSelectedVehicleForMileage(null);
         }}
-        title={selectedVehicleForMileage ? `Monitoramento de Km: ${selectedVehicleForMileage.plate}` : 'Configurar Monitoramento'}
-        subtitle="Configure o odômetro atual e o limite de quilometragem para a próxima revisão preventiva"
+        title={selectedVehicleForMileage ? `Monitoramento Preventivo: ${selectedVehicleForMileage.plate}` : 'Configurar Monitoramento'}
+        subtitle="Configure odômetro, limite de quilometragem e data da próxima revisão preventiva"
         maxWidth="md"
       >
         <form onSubmit={handleSaveMileageConfig} className="space-y-4">
@@ -3247,14 +3716,67 @@ export function AdminDashboard({
               onChange={(e) => setMileageConfigForm({ ...mileageConfigForm, nextPreventiveMaintenanceKm: parseInt(e.target.value) || 0 })}
               className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
             />
-            {mileageConfigForm.currentKm > mileageConfigForm.nextPreventiveMaintenanceKm && (
+            {mileageConfigForm.nextPreventiveMaintenanceKm > 0 && mileageConfigForm.currentKm >= mileageConfigForm.nextPreventiveMaintenanceKm ? (
               <p className="text-[11px] text-rose-400 font-semibold mt-1 flex items-center gap-1">
-                <AlertTriangle className="w-3.5 h-3.5" />
+                <AlertOctagon className="w-3.5 h-3.5 shrink-0" />
                 <span>
-                  Atenção: Este veículo ficará sinalizado como LIMITE ULTRAPASSADO (+{(mileageConfigForm.currentKm - mileageConfigForm.nextPreventiveMaintenanceKm).toLocaleString('pt-BR')} km).
+                  Alerta Vermelho: Limite atingido/ultrapassado (+{Math.max(0, mileageConfigForm.currentKm - mileageConfigForm.nextPreventiveMaintenanceKm).toLocaleString('pt-BR')} km).
                 </span>
               </p>
-            )}
+            ) : mileageConfigForm.nextPreventiveMaintenanceKm - mileageConfigForm.currentKm <= 1000 ? (
+              <p className="text-[11px] text-yellow-300 font-semibold mt-1 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  Alerta Amarelo: Faltam apenas {Math.max(0, mileageConfigForm.nextPreventiveMaintenanceKm - mileageConfigForm.currentKm).toLocaleString('pt-BR')} km para a revisão.
+                </span>
+              </p>
+            ) : null}
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">
+              Data Prevista para Próxima Revisão Preventiva
+            </label>
+            <input
+              type="date"
+              value={mileageConfigForm.nextPreventiveMaintenanceDate}
+              onChange={(e) => setMileageConfigForm({ ...mileageConfigForm, nextPreventiveMaintenanceDate: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+            />
+            {(() => {
+              const datePreview = evaluatePreventiveDate(mileageConfigForm.nextPreventiveMaintenanceDate);
+              if (datePreview.severity === 'red') {
+                return (
+                  <p className="text-[11px] text-rose-400 font-semibold mt-1 flex items-center gap-1">
+                    <AlertOctagon className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Alerta Vermelho: {datePreview.overdueDays === 0 ? `Revisão vence hoje (${datePreview.nextDateFormatted})` : `Data vencida há ${datePreview.overdueDays} dia(s) (${datePreview.nextDateFormatted})`}.
+                    </span>
+                  </p>
+                );
+              }
+              if (datePreview.severity === 'yellow' && datePreview.daysRemaining !== null) {
+                return (
+                  <p className="text-[11px] text-yellow-300 font-semibold mt-1 flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Alerta Amarelo: Faltam {datePreview.daysRemaining} dia(s) para a data prevista ({datePreview.nextDateFormatted}).
+                    </span>
+                  </p>
+                );
+              }
+              if (datePreview.severity === 'ok' && datePreview.daysRemaining !== null) {
+                return (
+                  <p className="text-[11px] text-emerald-400 font-medium mt-1 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Prazo regular: {datePreview.daysRemaining} dia(s) até {datePreview.nextDateFormatted}.
+                    </span>
+                  </p>
+                );
+              }
+              return null;
+            })()}
           </div>
 
           <div>
@@ -3300,7 +3822,7 @@ export function AdminDashboard({
           setSelectedVehicleForPreventive(null);
         }}
         title={selectedVehicleForPreventive ? `Registrar Revisão Preventiva: ${selectedVehicleForPreventive.plate}` : ''}
-        subtitle="Zera o alerta de limite ultrapassado e programa o próximo ciclo preventivo"
+        subtitle="Zera os alertas atuais e programa o próximo ciclo preventivo por km e data"
         maxWidth="md"
       >
         <form onSubmit={handlePerformPreventiveMaintenance} className="space-y-4">
@@ -3318,22 +3840,39 @@ export function AdminDashboard({
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">
-              Intervalo para a Próxima Revisão Preventiva (km) *
-            </label>
-            <input
-              type="number"
-              required
-              min={1000}
-              value={preventiveForm.intervalKm}
-              onChange={(e) => setPreventiveForm({ ...preventiveForm, intervalKm: parseInt(e.target.value) || 20000 })}
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
-            />
-            <span className="text-[11px] text-emerald-400 font-mono block mt-1">
-              Novo limite preventivo será: {(preventiveForm.currentKm + preventiveForm.intervalKm).toLocaleString('pt-BR')} km
-            </span>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Intervalo (km) *
+              </label>
+              <input
+                type="number"
+                required
+                min={1000}
+                value={preventiveForm.intervalKm}
+                onChange={(e) => setPreventiveForm({ ...preventiveForm, intervalKm: parseInt(e.target.value) || 20000 })}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Prazo (dias) *
+              </label>
+              <input
+                type="number"
+                required
+                min={1}
+                value={preventiveForm.intervalDays}
+                onChange={(e) => setPreventiveForm({ ...preventiveForm, intervalDays: parseInt(e.target.value) || 180 })}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 font-mono"
+              />
+            </div>
           </div>
+
+          <span className="text-[11px] text-emerald-400 font-mono block">
+            Próximo limite: {(preventiveForm.currentKm + preventiveForm.intervalKm).toLocaleString('pt-BR')} km · Próxima data: {addDaysToIsoDate(preventiveForm.intervalDays).split('-').reverse().join('/')}
+          </span>
 
           <div>
             <label className="block text-xs font-semibold text-slate-300 mb-1">
@@ -3767,28 +4306,47 @@ export function AdminDashboard({
                 {vehicles.length === 0 ? (
                   <p className="text-xs text-slate-400 py-6 text-center">Nenhum veículo cadastrado.</p>
                 ) : (
-                  vehicles.map((v) => (
-                    <div key={v.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
-                      <div>
-                        <strong className="text-slate-200 block">{v.plate} - {v.model}</strong>
-                        <span className="text-slate-400 font-mono text-[11px]">
-                          Odômetro: {v.currentKm.toLocaleString('pt-BR')} km · Próx. Óleo: {v.nextOilChangeKm.toLocaleString('pt-BR')} km
-                        </span>
+                  vehicles.map((v) => {
+                    const prevStatus = checkVehiclePreventiveStatus(v);
+                    return (
+                      <div key={v.id} className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                        <div className="flex items-center gap-2.5">
+                          {prevStatus.alertSeverity === 'red' ? (
+                            <span title="Alerta Vermelho: Revisão preventiva vencida">
+                              <AlertOctagon className="w-4 h-4 text-rose-400 shrink-0" />
+                            </span>
+                          ) : prevStatus.alertSeverity === 'yellow' ? (
+                            <span title="Alerta Amarelo: Revisão preventiva próxima">
+                              <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0" />
+                            </span>
+                          ) : (
+                            <span title="Manutenção preventiva em dia">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            </span>
+                          )}
+                          <div>
+                            <strong className="text-slate-200 block">{v.plate} - {v.model}</strong>
+                            <span className="text-slate-400 font-mono text-[11px]">
+                              Odômetro: {v.currentKm.toLocaleString('pt-BR')} km · Próx. Prev.: {prevStatus.limitKm.toLocaleString('pt-BR')} km
+                              {prevStatus.nextDateFormatted ? ` · Data: ${prevStatus.nextDateFormatted}` : ''}
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => setDeleteTarget({
+                            type: 'vehicle',
+                            id: v.id,
+                            title: `Excluir Veículo ${v.plate}`,
+                            description: `Tem certeza que deseja excluir o veículo ${v.plate} (${v.model})?`,
+                          })}
+                          className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Excluir</span>
+                        </button>
                       </div>
-                      <button
-                        onClick={() => setDeleteTarget({
-                          type: 'vehicle',
-                          id: v.id,
-                          title: `Excluir Veículo ${v.plate}`,
-                          description: `Tem certeza que deseja excluir o veículo ${v.plate} (${v.model})?`,
-                        })}
-                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg font-semibold flex items-center gap-1 transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Excluir</span>
-                      </button>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             )}

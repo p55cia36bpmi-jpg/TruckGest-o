@@ -80,8 +80,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             p = {
               uid: firebaseUser.uid,
               email: firebaseUser.email || '',
-              name: firebaseUser.displayName || 'Gestor de Frota',
-              role: isBootstrappedAdmin ? 'admin' : 'admin',
+              name: firebaseUser.displayName || 'Usuário TruckGestão',
+              role: isBootstrappedAdmin ? 'admin' : 'driver',
               createdAt: new Date().toISOString(),
             };
           }

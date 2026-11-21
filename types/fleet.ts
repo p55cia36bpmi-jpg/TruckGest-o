@@ -60,7 +60,7 @@ export interface Driver {
   name: string;
   cpf: string;
   cnhNumber: string;
-  cnhCategory: 'C' | 'D' | 'E';
+  cnhCategory: 'B' | 'C' | 'D' | 'E';
   cnhExpiry: string; // YYYY-MM-DD
   toxicologicalExpiry: string; // YYYY-MM-DD
   moppCertified: boolean;

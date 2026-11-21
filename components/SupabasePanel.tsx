@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS public.drivers (
     rg VARCHAR(30) NOT NULL,
     cpf VARCHAR(20) UNIQUE NOT NULL,
     address TEXT,
-    cnh_category VARCHAR(2) NOT NULL CHECK (cnh_category IN ('C', 'D', 'E')),
+    cnh_category VARCHAR(2) NOT NULL CHECK (cnh_category IN ('B', 'C', 'D', 'E')),
     cnh_number VARCHAR(30) NOT NULL,
     cnh_expiry DATE NOT NULL,
     vehicle_id TEXT REFERENCES public.vehicles(id) ON DELETE SET NULL,

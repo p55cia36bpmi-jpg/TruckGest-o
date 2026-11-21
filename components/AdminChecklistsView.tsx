@@ -8,6 +8,7 @@ import {
   UserProfile,
 } from '@/types/truck-service';
 import { updateVehicleChecklist, createNotification } from '@/services/firestoreService';
+import { sendDriverPushAlert } from '@/lib/fcmClientSend';
 import { MercosulPlate } from './MercosulPlate';
 import {
   ClipboardCheck,
@@ -104,20 +105,43 @@ export function AdminChecklistsView({
           : {}),
       });
 
+      const notifTitle =
+        newResolutionStatus === 'in_maintenance'
+          ? `Checklist ${checklist.vehiclePlate}: Veículo enviado para manutenção`
+          : `Checklist ${checklist.vehiclePlate}: Anomalia resolvida`;
+      const notifMsg =
+        newResolutionStatus === 'in_maintenance'
+          ? `O administrador encaminhou o veículo ${checklist.vehiclePlate} para manutenção.${adminNotes.trim() ? ` Obs: ${adminNotes.trim()}` : ''}`
+          : `As anomalias reportadas no checklist de ${checklist.vehiclePlate} foram resolvidas e o veículo está liberado.${adminNotes.trim() ? ` Obs: ${adminNotes.trim()}` : ''}`;
+
       await createNotification({
         targetRole: 'driver',
         targetUserId: checklist.driverId,
-        title:
-          newResolutionStatus === 'in_maintenance'
-            ? `Checklist ${checklist.vehiclePlate}: Veículo enviado para manutenção`
-            : `Checklist ${checklist.vehiclePlate}: Anomalia resolvida`,
-        message:
-          newResolutionStatus === 'in_maintenance'
-            ? `O administrador encaminhou o veículo ${checklist.vehiclePlate} para manutenção.${adminNotes.trim() ? ` Obs: ${adminNotes.trim()}` : ''}`
-            : `As anomalias reportadas no checklist de ${checklist.vehiclePlate} foram resolvidas e o veículo está liberado.${adminNotes.trim() ? ` Obs: ${adminNotes.trim()}` : ''}`,
+        title: notifTitle,
+        message: notifMsg,
         type: newResolutionStatus === 'in_maintenance' ? 'warning' : 'info',
         read: false,
       });
+
+      if (newResolutionStatus === 'in_maintenance') {
+        try {
+          await sendDriverPushAlert({
+            driverId: checklist.driverId,
+            category: 'maintenance',
+            title: notifTitle,
+            body: notifMsg,
+            priority: checklist.criticalAnomaliesCount > 0 ? 'urgent' : 'normal',
+            data: {
+              checklistId: checklist.id,
+              vehicleId: checklist.vehicleId,
+              vehiclePlate: checklist.vehiclePlate,
+            },
+            senderEmail: adminProfile.email,
+          });
+        } catch (pushErr) {
+          console.warn('Falha ao enviar push de manutenção do checklist:', pushErr);
+        }
+      }
 
       await onRefreshData();
     } catch (err) {

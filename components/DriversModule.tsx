@@ -43,7 +43,7 @@ export function DriversModule({
     name: '',
     cpf: '',
     cnhNumber: '',
-    cnhCategory: 'E' as 'C' | 'D' | 'E',
+    cnhCategory: 'E' as 'B' | 'C' | 'D' | 'E',
     cnhExpiry: '2028-12-31',
     toxicologicalExpiry: '2027-06-30',
     moppCertified: true,
@@ -357,12 +357,13 @@ export function DriversModule({
               </label>
               <select
                 value={newDriver.cnhCategory}
-                onChange={(e) => setNewDriver({ ...newDriver, cnhCategory: e.target.value as 'C' | 'D' | 'E' })}
+                onChange={(e) => setNewDriver({ ...newDriver, cnhCategory: e.target.value as 'B' | 'C' | 'D' | 'E' })}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
               >
                 <option value="E">Categoria E (Articulados / Bitrem)</option>
                 <option value="D">Categoria D (Caminhões Pesados)</option>
                 <option value="C">Categoria C (Caminhões Médios)</option>
+                <option value="B">Categoria B (Veículos Leves / Utilitários)</option>
               </select>
             </div>
 

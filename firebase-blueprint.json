@@ -50,7 +50,9 @@
         "lastPreventiveMaintenanceDate": { "type": "string", "maxLength": 30 },
         "lastPreventiveMaintenanceKm": { "type": "number" },
         "nextPreventiveMaintenanceKm": { "type": "number" },
+        "nextPreventiveMaintenanceDate": { "type": "string", "maxLength": 30 },
         "preventiveIntervalKm": { "type": "number" },
+        "preventiveIntervalDays": { "type": "number" },
         "filtersReplaced": { "type": "boolean" },
         "alertDismissed": { "type": "boolean" },
         "createdAt": { "type": "string", "maxLength": 50 }
@@ -258,6 +260,27 @@
         "respondedAt": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "driverId", "vehicleId", "origin", "destination", "cargoDescription", "scheduledDate", "priority", "status"]
+    },
+    "FcmToken": {
+      "title": "FcmToken",
+      "description": "Token de dispositivo e preferências de notificação push (FCM) de motoristas",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "driverId": { "type": "string", "maxLength": 128 },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "vehicleId": { "type": "string", "maxLength": 128 },
+        "token": { "type": "string", "maxLength": 512 },
+        "registrationMode": { "type": "string", "enum": ["fcm", "web_push_fallback"] },
+        "platform": { "type": "string", "enum": ["web"] },
+        "browserLabel": { "type": "string", "maxLength": 120 },
+        "enabled": { "type": "boolean" },
+        "notifyTrips": { "type": "boolean" },
+        "notifyMaintenance": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "driverId", "driverName", "token", "registrationMode", "platform", "enabled", "notifyTrips", "notifyMaintenance", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -316,6 +339,10 @@
     "/tripRequests/{tripId}": {
       "schema": { "$ref": "#/entities/TripRequest" },
       "description": "Solicitações de viagens despachadas pelo administrador aos motoristas"
+    },
+    "/fcmTokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/FcmToken" },
+      "description": "Tokens de notificação push FCM vinculados aos dispositivos dos motoristas"
     }
   }
 }

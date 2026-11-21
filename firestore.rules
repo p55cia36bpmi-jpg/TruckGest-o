@@ -83,5 +83,30 @@ service cloud.firestore {
       allow read: if true;
       allow create, update, delete: if isValidId(tripId);
     }
+
+    // 15. FCM Device Tokens (notificações push para motoristas)
+    function isValidFcmToken(data) {
+      return data.keys().hasAll(['id', 'driverId', 'driverName', 'token', 'registrationMode', 'platform', 'enabled', 'notifyTrips', 'notifyMaintenance', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'driverId', 'driverName', 'vehicleId', 'token', 'registrationMode', 'platform', 'browserLabel', 'enabled', 'notifyTrips', 'notifyMaintenance', 'createdAt', 'updatedAt'])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 128
+        && data.driverId is string && data.driverId.size() > 0 && data.driverId.size() <= 128
+        && data.driverName is string && data.driverName.size() > 0 && data.driverName.size() <= 120
+        && (!('vehicleId' in data) || (data.vehicleId is string && data.vehicleId.size() <= 128))
+        && data.token is string && data.token.size() > 0 && data.token.size() <= 512
+        && data.registrationMode in ['fcm', 'web_push_fallback']
+        && data.platform == 'web'
+        && (!('browserLabel' in data) || (data.browserLabel is string && data.browserLabel.size() <= 120))
+        && data.enabled is bool
+        && data.notifyTrips is bool
+        && data.notifyMaintenance is bool
+        && data.createdAt is string && data.createdAt.size() <= 50
+        && data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /fcmTokens/{tokenId} {
+      allow read: if true;
+      allow create, update: if isValidId(tokenId) && isValidFcmToken(request.resource.data);
+      allow delete: if isValidId(tokenId);
+    }
   }
 }

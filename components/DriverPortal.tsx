@@ -11,7 +11,8 @@ import {
   SystemNotification,
   VehicleChecklist,
   TripRequest,
-  TripRequestStatus
+  TripRequestStatus,
+  FcmDeviceRegistration
 } from '@/types/truck-service';
 import { 
   createDailyReport, 
@@ -23,7 +24,9 @@ import {
   subscribeDriverChecklists,
   subscribeDriverTripRequests,
   markNotificationAsRead,
-  updateTripRequestStatus
+  updateTripRequestStatus,
+  saveDriverFcmToken,
+  updateDriverFcmPreferences
 } from '@/services/firestoreService';
 import { MercosulPlate } from './MercosulPlate';
 import { VehicleChecklistSection } from './VehicleChecklistSection';
@@ -31,17 +34,29 @@ import {
   DriverAlertControlBar,
   DriverToastStack,
   DriverToastItem,
+  DriverPushStatus,
 } from './DriverToastNotifier';
 import {
   playNotificationSound,
   unlockNotificationAudio,
 } from '@/lib/notificationSound';
+import {
+  checkVehiclePreventiveStatus,
+  getPreventiveAlertReasons,
+} from '@/lib/fleetAlerts';
+import {
+  getBrowserLabel,
+  listenForegroundFcmMessages,
+  requestDriverFcmRegistration,
+  showNativePushNotification,
+} from '@/lib/fcm';
 import { 
   Truck, 
   FileText, 
   Plus, 
   Trash2, 
   AlertTriangle, 
+  AlertOctagon,
   CheckCircle2, 
   Fuel, 
   ChevronRight, 
@@ -51,6 +66,7 @@ import {
   ClipboardCheck,
   Navigation,
   MapPin,
+  Calendar,
   Check,
   X
 } from 'lucide-react';
@@ -86,6 +102,24 @@ export function DriverPortal({
   const [toasts, setToasts] = useState<DriverToastItem[]>([]);
   const soundMutedRef = useRef(soundMuted);
   const seenAlertIdsRef = useRef<Set<string>>(new Set());
+  const seenPushIdsRef = useRef<Set<string>>(new Set());
+
+  // FCM Push Notification State
+  const [pushStatus, setPushStatus] = useState<DriverPushStatus>(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return 'unsupported';
+    }
+    if (Notification.permission === 'denied') {
+      return 'blocked';
+    }
+    return 'inactive';
+  });
+  const [pushEnabled, setPushEnabled] = useState<boolean>(false);
+  const [pushLoading, setPushLoading] = useState<boolean>(false);
+  const [pushFeedback, setPushFeedback] = useState<string | null>(null);
+  const [activeFcmReg, setActiveFcmReg] = useState<FcmDeviceRegistration | null>(null);
+  const [notifyTrips, setNotifyTrips] = useState<boolean>(true);
+  const [notifyMaintenance, setNotifyMaintenance] = useState<boolean>(true);
 
   useEffect(() => {
     soundMutedRef.current = soundMuted;
@@ -144,6 +178,14 @@ export function DriverPortal({
 
   // Linked vehicle
   const linkedVehicle = vehicles.find((v) => v.id === currentDriver.vehicleId) || vehicles[0];
+  const linkedVehiclePreventive = useMemo(
+    () => (linkedVehicle ? checkVehiclePreventiveStatus(linkedVehicle) : null),
+    [linkedVehicle]
+  );
+  const linkedVehicleAlertReasons = useMemo(
+    () => (linkedVehiclePreventive ? getPreventiveAlertReasons(linkedVehiclePreventive) : []),
+    [linkedVehiclePreventive]
+  );
 
   // Oil change alert calculation (< 200 km)
   const kmToNextOilChange = linkedVehicle ? linkedVehicle.nextOilChangeKm - linkedVehicle.currentKm : 9999;
@@ -196,6 +238,7 @@ export function DriverPortal({
   // Subscribe to real-time Firestore notifications, checklists, and trip requests
   useEffect(() => {
     seenAlertIdsRef.current.clear();
+    seenPushIdsRef.current.clear();
     const unsubNotif = subscribeDriverNotifications(currentDriver.id, (items) => {
       setDriverNotifications(items);
     });
@@ -213,6 +256,96 @@ export function DriverPortal({
       unsubTrips();
     };
   }, [currentDriver.id]);
+
+  // Register FCM / Web Push automatically if browser permission was already granted
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return;
+    }
+    if (Notification.permission !== 'granted') {
+      return;
+    }
+
+    const disabledKey = `truckgestao_driver_push_disabled_${currentDriver.id}`;
+    const userPaused = localStorage.getItem(disabledKey) === 'true';
+
+    if (Notification.permission === 'granted' && !userPaused) {
+      let active = true;
+      requestDriverFcmRegistration(currentDriver.id).then(async (outcome) => {
+        if (!active || !outcome.token) return;
+        setPushStatus(outcome.registrationMode);
+        setPushEnabled(true);
+        try {
+          const saved = await saveDriverFcmToken({
+            driverId: currentDriver.id,
+            driverName: currentDriver.name,
+            vehicleId: currentDriver.vehicleId,
+            token: outcome.token,
+            registrationMode: outcome.registrationMode,
+            browserLabel: getBrowserLabel(),
+            enabled: true,
+            notifyTrips: true,
+            notifyMaintenance: true,
+          });
+          if (active) {
+            setActiveFcmReg(saved);
+            setNotifyTrips(saved.notifyTrips);
+            setNotifyMaintenance(saved.notifyMaintenance);
+          }
+        } catch (err) {
+          console.warn('Erro ao sincronizar token FCM no Firestore:', err);
+        }
+      });
+      return () => {
+        active = false;
+      };
+    }
+  }, [currentDriver.id, currentDriver.name, currentDriver.vehicleId]);
+
+  // Listen to foreground FCM messages when push is active
+  useEffect(() => {
+    if (!pushEnabled) return;
+    let unsubscribeFn: (() => void) | null = null;
+    let cancelled = false;
+
+    listenForegroundFcmMessages((payload) => {
+      const data = payload.data || {};
+      const title =
+        payload.notification?.title || data.title || 'Novo Alerta TruckGestão';
+      const body =
+        payload.notification?.body || data.body || 'Você recebeu uma nova atualização.';
+      const category = data.category === 'maintenance' ? 'checklist' : 'trip';
+      const priority = data.priority === 'urgent' ? 'critical' : category;
+      const alertKey = `fcm-fg-${data.tripId || data.vehicleId || Date.now()}`;
+
+      pushToastWithSound({
+        id: alertKey,
+        category: priority,
+        title,
+        message: body,
+        persistent: data.priority === 'urgent' || category === 'checklist',
+        createdAt: new Date().toISOString(),
+      });
+
+      showNativePushNotification({
+        title,
+        body,
+        tag: `truckgestao-${data.category || 'alert'}`,
+        requireInteraction: data.priority === 'urgent',
+      });
+    }).then((unsub) => {
+      if (cancelled) {
+        unsub();
+      } else {
+        unsubscribeFn = unsub;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (unsubscribeFn) unsubscribeFn();
+    };
+  }, [pushEnabled, pushToastWithSound]);
 
   const todayDateStr = new Date().toISOString().slice(0, 10);
   const hasTodayChecklist = useMemo(
@@ -304,20 +437,23 @@ export function DriverPortal({
       newPendingTrips.forEach((trip) => {
         const toastId = `trip-${trip.id}`;
         seenAlertIdsRef.current.add(toastId);
+        const toastTitle =
+          trip.priority === 'urgent'
+            ? 'Solicitação de Viagem Urgente!'
+            : 'Nova Solicitação de Viagem Pendente';
+        const toastBody = `${trip.cargoDescription} · Agendada para ${trip.scheduledDate
+          .split('-')
+          .reverse()
+          .join('/')} · Frete est.: R$ ${trip.estimatedFreight.toLocaleString('pt-BR', {
+          minimumFractionDigits: 2,
+        })}`;
+
         pushToastWithSound({
           id: toastId,
           category: trip.priority === 'urgent' ? 'critical' : 'trip',
-          title:
-            trip.priority === 'urgent'
-              ? 'Solicitação de Viagem Urgente!'
-              : 'Nova Solicitação de Viagem Pendente',
+          title: toastTitle,
           meta: `${trip.origin} → ${trip.destination} · ${trip.vehiclePlate}`,
-          message: `${trip.cargoDescription} · Agendada para ${trip.scheduledDate
-            .split('-')
-            .reverse()
-            .join('/')} · Frete est.: R$ ${trip.estimatedFreight.toLocaleString('pt-BR', {
-            minimumFractionDigits: 2,
-          })}`,
+          message: toastBody,
           actionLabel: 'Aceitar Viagem',
           onAction: () => handleRespondTrip(trip, 'accepted'),
           secondaryLabel: 'Ver Viagens',
@@ -325,11 +461,21 @@ export function DriverPortal({
           persistent: true,
           createdAt: trip.createdAt,
         });
+
+        if (pushEnabled && notifyTrips && !seenPushIdsRef.current.has(toastId)) {
+          seenPushIdsRef.current.add(toastId);
+          showNativePushNotification({
+            title: `${toastTitle} (${trip.vehiclePlate})`,
+            body: `${trip.origin} → ${trip.destination} · ${toastBody}`,
+            tag: `truckgestao-trip-${trip.id}`,
+            requireInteraction: trip.priority === 'urgent',
+          });
+        }
       });
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [pendingTrips, pushToastWithSound, handleRespondTrip]);
+  }, [pendingTrips, pushToastWithSound, handleRespondTrip, pushEnabled, notifyTrips]);
 
   useEffect(() => {
     const freshNotifs = unreadDriverNotifications.filter(
@@ -342,12 +488,16 @@ export function DriverPortal({
         const toastId = `notif-${notif.id}`;
         seenAlertIdsRef.current.add(toastId);
         const isChecklistNotif = notif.title.toLowerCase().includes('checklist');
+        const isMaintenanceNotif =
+          notif.title.toLowerCase().includes('manutenção') ||
+          notif.title.toLowerCase().includes('revisão') ||
+          notif.title.toLowerCase().includes('óleo');
         pushToastWithSound({
           id: toastId,
           category:
             notif.type === 'critical'
               ? 'critical'
-              : isChecklistNotif
+              : isChecklistNotif || isMaintenanceNotif
               ? 'checklist'
               : 'info',
           title: notif.title,
@@ -366,11 +516,70 @@ export function DriverPortal({
           persistent: notif.type !== 'info',
           createdAt: notif.createdAt,
         });
+
+        if (
+          pushEnabled &&
+          notifyMaintenance &&
+          (isMaintenanceNotif || notif.type === 'critical' || notif.type === 'warning') &&
+          !seenPushIdsRef.current.has(toastId)
+        ) {
+          seenPushIdsRef.current.add(toastId);
+          showNativePushNotification({
+            title: notif.title,
+            body: notif.message,
+            tag: `truckgestao-maint-${notif.id}`,
+            requireInteraction: notif.type === 'critical',
+          });
+        }
       });
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [unreadDriverNotifications, pushToastWithSound]);
+  }, [unreadDriverNotifications, pushToastWithSound, pushEnabled, notifyMaintenance]);
+
+  // Also send local maintenance push alert if linked vehicle has pending/overdue preventive or oil alert
+  useEffect(() => {
+    if (!pushEnabled || !notifyMaintenance || !linkedVehicle || !linkedVehiclePreventive) {
+      return;
+    }
+    const hasPendingMaint =
+      linkedVehiclePreventive.alertSeverity !== 'ok' || isOilAlertActive;
+    if (!hasPendingMaint) return;
+
+    const maintKey = `veh-maint-${linkedVehicle.id}-${linkedVehiclePreventive.alertSeverity}-${isOilAlertActive ? 'oil' : 'rev'}`;
+    if (seenPushIdsRef.current.has(maintKey)) return;
+    seenPushIdsRef.current.add(maintKey);
+
+    const reasons = [...linkedVehicleAlertReasons];
+    if (isOilAlertActive) {
+      reasons.push(
+        kmToNextOilChange <= 0
+          ? 'Troca de óleo vencida'
+          : `Troca de óleo em ${kmToNextOilChange} km`
+      );
+    }
+
+    const title =
+      linkedVehiclePreventive.alertSeverity === 'red'
+        ? `Manutenção Vencida: ${linkedVehicle.plate}`
+        : `Manutenção Pendente: ${linkedVehicle.plate}`;
+    const body = reasons.join(' · ') || 'Verifique o plano de revisão preventiva do veículo.';
+
+    showNativePushNotification({
+      title,
+      body,
+      tag: `truckgestao-vehicle-maint-${linkedVehicle.id}`,
+      requireInteraction: linkedVehiclePreventive.alertSeverity === 'red',
+    });
+  }, [
+    pushEnabled,
+    notifyMaintenance,
+    linkedVehicle,
+    linkedVehiclePreventive,
+    linkedVehicleAlertReasons,
+    isOilAlertActive,
+    kmToNextOilChange,
+  ]);
 
   const handleToggleSoundMute = () => {
     setSoundMuted((prev) => {
@@ -393,18 +602,107 @@ export function DriverPortal({
   const handleTestSoundToast = async () => {
     await unlockNotificationAudio();
     setAudioBlocked(false);
+    const title = 'Teste de Notificação Ativo';
+    const message =
+      'Os alertas visuais, sonoros e push para novas viagens e manutenções pendentes estão funcionando.';
     pushToastWithSound({
       id: `test-toast-${Date.now()}`,
       category: pendingTrips.length > 0 ? 'trip' : 'checklist',
-      title: 'Teste de Notificação Sonora Ativo',
-      meta: `${currentDriver.name} · Sistema de Áudio Web`,
-      message:
-        'Os alertas sonoros para checklists pendentes e novas solicitações de viagem estão funcionando.',
+      title,
+      meta: `${currentDriver.name} · Central de Alertas`,
+      message,
       actionLabel: 'Abrir Checklist',
       onAction: () => setActiveView('checklist'),
       persistent: false,
       createdAt: new Date().toISOString(),
     });
+    if (pushEnabled) {
+      await showNativePushNotification({
+        title,
+        body: message,
+        tag: 'truckgestao-test-push',
+      });
+    }
+  };
+
+  const handleTogglePush = async () => {
+    const disabledKey = `truckgestao_driver_push_disabled_${currentDriver.id}`;
+    if (pushEnabled) {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(disabledKey, 'true');
+      }
+      setPushEnabled(false);
+      setPushStatus('inactive');
+      setPushFeedback('Notificações push pausadas neste dispositivo.');
+      if (activeFcmReg) {
+        await updateDriverFcmPreferences(activeFcmReg.id, { enabled: false });
+      }
+      return;
+    }
+
+    setPushLoading(true);
+    setPushFeedback(null);
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(disabledKey);
+      }
+      const outcome = await requestDriverFcmRegistration(currentDriver.id);
+      if (outcome.permission === 'denied') {
+        setPushStatus('blocked');
+        setPushEnabled(false);
+        setPushFeedback('Permissão bloqueada no navegador. Libere as notificações na barra de endereço.');
+        return;
+      }
+      if (!outcome.token) {
+        setPushStatus(outcome.supported ? 'inactive' : 'unsupported');
+        setPushEnabled(false);
+        setPushFeedback(outcome.reason || 'Não foi possível ativar as notificações push.');
+        return;
+      }
+
+      const saved = await saveDriverFcmToken({
+        driverId: currentDriver.id,
+        driverName: currentDriver.name,
+        vehicleId: currentDriver.vehicleId,
+        token: outcome.token,
+        registrationMode: outcome.registrationMode,
+        browserLabel: getBrowserLabel(),
+        enabled: true,
+        notifyTrips,
+        notifyMaintenance,
+      });
+      setActiveFcmReg(saved);
+      setPushStatus(outcome.registrationMode);
+      setPushEnabled(true);
+      setPushFeedback(
+        outcome.registrationMode === 'fcm'
+          ? 'Notificações Push FCM ativadas para novas viagens e manutenções.'
+          : 'Notificações Push Web ativadas neste dispositivo.'
+      );
+      await showNativePushNotification({
+        title: 'Push TruckGestão Ativado',
+        body: 'Você receberá alertas de novas solicitações de viagem e manutenções pendentes.',
+        tag: 'truckgestao-push-welcome',
+      });
+    } finally {
+      setPushLoading(false);
+    }
+  };
+
+  const handleToggleNotifyTrips = async () => {
+    const next = !notifyTrips;
+    setNotifyTrips(next);
+    if (activeFcmReg) {
+      await updateDriverFcmPreferences(activeFcmReg.id, { notifyTrips: next });
+    }
+  };
+
+  const handleToggleNotifyMaintenance = async () => {
+    const next = !notifyMaintenance;
+    setNotifyMaintenance(next);
+    if (activeFcmReg) {
+      await updateDriverFcmPreferences(activeFcmReg.id, { notifyMaintenance: next });
+    }
   };
 
   const handleReplayPendingAlerts = async () => {
@@ -655,16 +953,61 @@ export function DriverPortal({
           </div>
         </div>
 
-        {/* Linked Vehicle Info Badge */}
+        {/* Linked Vehicle Info Badge with Preventive Alert Highlighting */}
         {linkedVehicle && (
-          <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 flex items-center gap-4 self-stretch md:self-auto">
+          <div
+            data-alert-severity={linkedVehiclePreventive?.alertSeverity || 'ok'}
+            className={`p-3.5 rounded-xl flex items-center gap-3.5 self-stretch md:self-auto transition-all ${
+              linkedVehiclePreventive?.alertSeverity === 'red'
+                ? 'bg-gradient-to-r from-rose-950/60 to-slate-950 border-2 border-rose-500 ring-1 ring-rose-500/40 shadow-lg shadow-rose-950/40'
+                : linkedVehiclePreventive?.alertSeverity === 'yellow'
+                ? 'bg-gradient-to-r from-yellow-950/40 to-slate-950 border-2 border-yellow-400/90 ring-1 ring-yellow-400/30 shadow-md shadow-yellow-950/25'
+                : 'bg-slate-950 border border-slate-800'
+            }`}
+          >
+            {linkedVehiclePreventive?.alertSeverity === 'red' ? (
+              <div
+                className="w-9 h-9 rounded-xl bg-rose-500/25 border border-rose-400/80 flex items-center justify-center text-rose-300 shrink-0"
+                title={linkedVehicleAlertReasons.join(' · ') || 'Manutenção preventiva vencida'}
+              >
+                <AlertOctagon className="w-5 h-5 animate-pulse" />
+              </div>
+            ) : linkedVehiclePreventive?.alertSeverity === 'yellow' ? (
+              <div
+                className="w-9 h-9 rounded-xl bg-yellow-400/25 border border-yellow-400/80 flex items-center justify-center text-yellow-300 shrink-0"
+                title={linkedVehicleAlertReasons.join(' · ') || 'Manutenção preventiva próxima'}
+              >
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+            ) : null}
             <MercosulPlate plate={linkedVehicle.plate} size="md" />
-            <div className="text-xs">
-              <span className="text-slate-400 block">Veículo Vinculado</span>
-              <strong className="text-slate-100 font-medium">{linkedVehicle.model}</strong>
+            <div className="text-xs min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-slate-400">Veículo Vinculado</span>
+                {linkedVehiclePreventive?.alertSeverity === 'red' && (
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500 text-white text-[9px] font-bold uppercase tracking-wide">
+                    Revisão Vencida
+                  </span>
+                )}
+                {linkedVehiclePreventive?.alertSeverity === 'yellow' && (
+                  <span className="px-1.5 py-0.5 rounded bg-yellow-400 text-slate-950 text-[9px] font-bold uppercase tracking-wide">
+                    Revisão Próxima
+                  </span>
+                )}
+              </div>
+              <strong className="text-slate-100 font-medium block truncate">{linkedVehicle.model}</strong>
               <div className="text-[11px] text-slate-400 font-mono">
                 Odômetro: {linkedVehicle.currentKm.toLocaleString('pt-BR')} km
               </div>
+              {linkedVehicleAlertReasons.length > 0 && (
+                <div
+                  className={`text-[10px] font-semibold mt-0.5 ${
+                    linkedVehiclePreventive?.alertSeverity === 'red' ? 'text-rose-300' : 'text-yellow-300'
+                  }`}
+                >
+                  {linkedVehicleAlertReasons.join(' · ')}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -705,7 +1048,7 @@ export function DriverPortal({
         </div>
       )}
 
-      {/* Sound Notification Control Bar */}
+      {/* Sound & FCM Push Notification Control Bar */}
       <DriverAlertControlBar
         soundMuted={soundMuted}
         audioBlocked={audioBlocked}
@@ -714,6 +1057,15 @@ export function DriverPortal({
         onUnlockAudio={handleUnlockAudioClick}
         onTestSoundToast={handleTestSoundToast}
         onReplayPendingAlerts={handleReplayPendingAlerts}
+        pushStatus={pushStatus}
+        pushEnabled={pushEnabled}
+        pushLoading={pushLoading}
+        notifyTrips={notifyTrips}
+        notifyMaintenance={notifyMaintenance}
+        pushFeedback={pushFeedback}
+        onTogglePush={handleTogglePush}
+        onToggleNotifyTrips={handleToggleNotifyTrips}
+        onToggleNotifyMaintenance={handleToggleNotifyMaintenance}
       />
 
       {/* Driver Quick View Selector */}
@@ -953,15 +1305,56 @@ export function DriverPortal({
             </div>
 
             {/* Maintenance Status Card */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">
+            <div
+              className={`rounded-2xl p-6 space-y-4 shadow-sm relative overflow-hidden ${
+                linkedVehiclePreventive?.alertSeverity === 'red'
+                  ? 'bg-gradient-to-b from-rose-950/30 via-slate-900 to-slate-900 border-2 border-rose-500 ring-1 ring-rose-500/35'
+                  : linkedVehiclePreventive?.alertSeverity === 'yellow'
+                  ? 'bg-gradient-to-b from-yellow-950/20 via-slate-900 to-slate-900 border-2 border-yellow-400/85 ring-1 ring-yellow-400/25'
+                  : 'bg-slate-900 border border-slate-800'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs uppercase font-bold text-slate-300 tracking-wider flex items-center gap-1.5">
+                  {linkedVehiclePreventive?.alertSeverity === 'red' ? (
+                    <AlertOctagon className="w-4 h-4 text-rose-400 animate-pulse" />
+                  ) : linkedVehiclePreventive?.alertSeverity === 'yellow' ? (
+                    <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  )}
                   Status de Manutenção
                 </span>
                 <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                   Filtros Trocados: {linkedVehicle?.filtersReplaced ? 'SIM' : 'NÃO'}
                 </span>
               </div>
+
+              {linkedVehicleAlertReasons.length > 0 && linkedVehiclePreventive && (
+                <div
+                  className={`p-2.5 rounded-xl border text-xs flex items-start gap-2 ${
+                    linkedVehiclePreventive.alertSeverity === 'red'
+                      ? 'bg-rose-500/15 border-rose-500/50 text-rose-200'
+                      : 'bg-yellow-400/10 border-yellow-400/50 text-yellow-100'
+                  }`}
+                >
+                  {linkedVehiclePreventive.alertSeverity === 'red' ? (
+                    <AlertOctagon className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
+                  )}
+                  <div>
+                    <strong className="block">
+                      {linkedVehiclePreventive.alertSeverity === 'red'
+                        ? 'Alerta Vermelho: Revisão Preventiva Vencida'
+                        : 'Alerta Amarelo: Revisão Preventiva Próxima'}
+                    </strong>
+                    <span className="text-[11px] font-mono opacity-90">
+                      {linkedVehicleAlertReasons.join(' · ')}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-3 text-xs">
                 <div className="flex justify-between py-1.5 border-b border-slate-800">
@@ -976,6 +1369,25 @@ export function DriverPortal({
                     {linkedVehicle?.nextOilChangeKm.toLocaleString('pt-BR')} km (em {kmToNextOilChange} km)
                   </span>
                 </div>
+                {linkedVehiclePreventive?.nextDateFormatted && (
+                  <div className="flex justify-between py-1.5 border-b border-slate-800">
+                    <span className="text-slate-400 flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5 text-slate-500" />
+                      Próxima Revisão Preventiva:
+                    </span>
+                    <span
+                      className={`font-mono font-bold ${
+                        linkedVehiclePreventive.isDateExceeded
+                          ? 'text-rose-400'
+                          : linkedVehiclePreventive.isDateWarning
+                          ? 'text-yellow-300'
+                          : 'text-emerald-400'
+                      }`}
+                    >
+                      {linkedVehiclePreventive.nextDateFormatted}
+                    </span>
+                  </div>
+                )}
                 <div className="flex justify-between py-1.5 border-b border-slate-800">
                   <span className="text-slate-400">Quilometragem Atual:</span>
                   <span className="font-mono font-bold text-slate-100 text-sm">
